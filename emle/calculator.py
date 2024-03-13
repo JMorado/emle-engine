@@ -375,6 +375,8 @@ class EMLECalculator:
         external_backend=None,
         plugin_path=".",
         mm_charges=None,
+        potential_type=None,
+        qm_cutoff=9.0,
         deepmd_model=None,
         deepmd_deviation=None,
         rascal_model=None,
@@ -433,6 +435,26 @@ class EMLECalculator:
             when the embedding method is "mm". Alternatively, pass the path to
             a file containing the charges. The file should contain a single
             column. Units are electron charge.
+
+        potential_type: str
+            The type of Coulomb potential to use. Options are:
+                "shifted_force":
+                    The potential is truncated and shifted so that both the energy
+                    and forces are zero at the cutoff distance.
+                "shifted_energy":
+                    The potential is truncated and shifted so that the energy is
+                    zero at the cutoff distance, but the forces are not.
+                "truncated":
+                    The potential is truncated at the cutoff distance, without
+                    shifting.
+                None:
+                    The potential is not truncated at the cutoff distance.
+                    Therefore, all MM atoms within the cutoff distance of any QM
+                    atom will contribute to the energy and forces.
+
+        qm_cutoff: int or float
+            The cutoff distance used for the QM region. This is only required when
+            'potential_type' is 'shifted_force'.
 
         deepmd_model: str
             Path to the DeePMD model file to use for in vacuo calculations. This
@@ -959,6 +981,28 @@ class EMLECalculator:
         else:
             self._is_interpolate = False
 
+        # Set the potential type and cutoff distance.
+        if potential_type is not None:
+            if not isinstance(potential_type, str):
+                msg = "'potential_type' must be of type 'str'"
+                _logger.error(msg)
+                raise TypeError(msg)
+            potential_type = potential_type.replace(" ", "").lower()
+            if potential_type not in ["shifted_force", "shifted_energy", "truncated"]:
+                msg = "'potential_type' must be either 'None', 'shifted_force', 'shifted_energy', or 'truncated'"
+                _logger.error(msg)
+                raise ValueError(msg)
+            self._potential_type = potential_type
+
+            if not isinstance(qm_cutoff, (int, float)):
+                msg = "'cutoff' must be of type 'int' or 'float'"
+                _logger.error(msg)
+                raise TypeError(msg)
+            self._qm_cutoff = float(qm_cutoff) * _ANGSTROM_TO_BOHR  # Convert to Bohr
+        else:
+            self._potential_type = None
+            self._qm_cutoff = None
+
         # Validate the PyTorch device.
         if device is not None:
             if not isinstance(device, str):
@@ -1428,7 +1472,7 @@ class EMLECalculator:
             else:
                 offset = int(not self._restart)
                 lam = self._lambda_interpolate[0] + (
-                    (self._step / (self._interpolate_steps - offset))
+                    self._step / (self._interpolate_steps - offset)
                 ) * (self._lambda_interpolate[1] - self._lambda_interpolate[0])
                 if lam < 0.0:
                     lam = 0.0
@@ -1814,7 +1858,7 @@ class EMLECalculator:
             else:
                 offset = int(not self._restart)
                 lam = self._lambda_interpolate[0] + (
-                    (self._step / (self._interpolate_steps - offset))
+                    self._step / (self._interpolate_steps - offset)
                 ) * (self._lambda_interpolate[1] - self._lambda_interpolate[0])
                 if lam < 0.0:
                     lam = 0.0
@@ -1932,7 +1976,9 @@ class EMLECalculator:
             q_core = self._q_core_mm
         k_Z = self._k_Z[self._species_id]
         r_data = self._get_r_data(xyz_qm_bohr, self._device)
-        mesh_data = self._get_mesh_data(xyz_qm_bohr, xyz_mm_bohr, s)
+        mesh_data = self._get_mesh_data(
+            xyz_qm_bohr, xyz_mm_bohr, s, self._potential_type, self._qm_cutoff
+        )
         if self._method in ["electrostatic", "nonpol"]:
             q = self._get_q(r_data, s, chi)
             q_val = q - q_core
@@ -2059,7 +2105,7 @@ class EMLECalculator:
         """
         A = self._get_A_thole(r_data, s, q_val, k_Z)
 
-        r = 1.0 / mesh_data["T0_mesh"]
+        r = mesh_data["r_mesh"]
         f1 = self._get_f1_slater(r, s[:, None] * 2.0)
         fields = _torch.sum(
             mesh_data["T1_mesh"] * f1[:, :, None] * q[:, None], axis=1
@@ -2227,7 +2273,7 @@ class EMLECalculator:
         return {"r_mat": r_mat, "T01": t01, "T11": t11, "T21": t21, "T22": t22}
 
     @classmethod
-    def _get_mesh_data(cls, xyz, xyz_mesh, s):
+    def _get_mesh_data(cls, xyz, xyz_mesh, s, potential_type, cutoff):
         """
         Internal method, calculates mesh_data object.
 
@@ -2242,15 +2288,77 @@ class EMLECalculator:
 
         s: torch.tensor (N_ATOMS,)
             MBIS valence widths.
+
+        potential_type: str
+            The type of potential to use.
+
+        cutoff: float
+            The cutoff distance for the potential.
         """
         rr = xyz_mesh[None, :, :] - xyz[:, None, :]
         r = _torch.linalg.norm(rr, axis=2)
+        if potential_type is None:
+            return {
+                "r_mesh": r,
+                "T0_mesh": 1.0 / r,
+                "T0_mesh_slater": cls._get_T0_slater(r, s[:, None]),
+                "T1_mesh": -rr / r[:, :, None] ** 3,
+            }
+        elif potential_type == "truncated":
+            mask_T0 = r < cutoff
+            mask_T1 = mask_T0.unsqueeze(-1).repeat(1, 1, 3)
 
-        return {
-            "T0_mesh": 1.0 / r,
-            "T0_mesh_slater": cls._get_T0_slater(r, s[:, None]),
-            "T1_mesh": -rr / r[:, :, None] ** 3,
-        }
+            return {
+                "r_mesh": r,
+                "T0_mesh": _torch.where(mask_T0, 1.0 / r, 0.0),
+                "T0_mesh_slater": _torch.where(
+                    mask_T0, cls._get_T0_slater(r, s[:, None]), 0.0
+                ),
+                "T1_mesh": _torch.where(mask_T1, -rr / r[:, :, None] ** 3, 0.0),
+            }
+        elif potential_type == "shifted_energy":
+            mask_T0 = r < cutoff
+            mask_T1 = mask_T0.unsqueeze(-1).repeat(1, 1, 3)
+
+            return {
+                "r_mesh": r,
+                "T0_mesh": _torch.where(mask_T0, (1.0 / r - 1.0 / cutoff), 0.0),
+                "T0_mesh_slater": _torch.where(
+                    mask_T0,
+                    cls._get_T0_slater(r, s[:, None])
+                    - cls._get_T0_slater(cutoff, s[:, None]),
+                    0.0,
+                ),
+                "T1_mesh": _torch.where(
+                    mask_T1, -rr * (1 / r[:, :, None] ** 3 - 1 / cutoff**3), 0.0
+                ),
+            }
+        elif potential_type == "shifted_force":
+            mask_T0 = r < cutoff
+            mask_T1 = mask_T0.unsqueeze(-1).repeat(1, 1, 3)
+
+            return {
+                "r_mesh": r,
+                "T0_mesh": _torch.where(
+                    mask_T0, (r - cutoff) ** 2 / (r * cutoff**2), 0.0
+                ),
+                "T0_mesh_slater": _torch.where(
+                    mask_T0,
+                    cls._get_T0_slater(r, s[:, None])
+                    + cls._get_T0_slater_shifted_force(r, s[:, None], cutoff),
+                    0.0,
+                ),
+                "T1_mesh": _torch.where(
+                    mask_T1,
+                    -rr
+                    * (
+                        1 / r[:, :, None] ** 3
+                        + (3 * r[:, :, None]) / cutoff**4
+                        - 4 / cutoff**3
+                    ),
+                    0.0,
+                ),
+            }
 
     @classmethod
     def _get_f1_slater(cls, r, s):
@@ -2296,6 +2404,43 @@ class EMLECalculator:
         results: torch.tensor (N_ATOMS, max_mm_atoms)
         """
         return (1 - (1 + r / (s * 2)) * _torch.exp(-r / s)) / r
+
+    @staticmethod
+    def _get_T0_slater_shifted_force(r, s, cutoff):
+        """
+        Internal method, calculates the shifted-force term for T0 tensor for Slater densities.
+
+        Parameters
+        ----------
+
+        r: torch.tensor (N_ATOMS, max_mm_atoms)
+            Distances from QM to MM atoms.
+
+        s: torch.tensor (N_ATOMS,)
+            MBIS valence widths.
+
+        cutoff: float
+            Cutoff distance for the shifted potential.
+
+        Returns
+        -------
+        results: torch.tensor (N_ATOMS, max_mm_atoms)
+        """
+        termA = (
+            -4
+            + (_torch.exp(-cutoff / s) * (cutoff**2 + 3 * cutoff * s + 4 * s**2))
+            / (s**2)
+        ) / (2 * cutoff)
+
+        termB = (
+            r
+            * (
+                2
+                - (_torch.exp(-cutoff / s) * (cutoff**2 + 2 * cutoff * s + 2 * s**2))
+                / (s**2)
+            )
+        ) / (2 * cutoff**2)
+        return termA + termB
 
     @staticmethod
     def _get_T0_gaussian(t01, r, s_mat):
