@@ -74,6 +74,14 @@ _SPHERICAL_EXPANSION_HYPERS_COMMON = {
     "global_species": _SPECIES,
 }
 
+# Ad-hoc variables that control the scaling of the dipole-charge interactions.
+# Later it would be good to do a proper implementation of these, but for now this hack will work.
+# Default values will run the default EMLE implementation.
+SCREENING_FACTOR = float(_os.getenv("EMLE_SCREENING_FACTOR", 2))
+SCREENING_TYPE = str(_os.getenv("EMLE_SCREENING_TYPE", "smeared_dipole"))
+assert isinstance(SCREENING_TYPE, str), "Screening type must be a string"
+assert SCREENING_TYPE in ["smeared_dipole", "dielectric"], "Screening type must be either 'smeared_dipole' or 'dielectric'"
+
 
 class _GPRCalculator:
     """Predicts an atomic property for a molecule with Gaussian Process Regression (GPR)."""
@@ -2191,9 +2199,17 @@ class EMLECalculator:
         A = self._get_A_thole(r_data, s, q_val, k_Z)
 
         r = mesh_data["r_mesh"]
-        f1 = self._get_f1_slater(r, s[:, None] * 2.0)
+
+        if SCREENING_TYPE.lower() == "smeared_dipole":
+            f1 = self._get_f1_slater(r, s[:, None] * SCREENING_FACTOR)
+            f1 = f1[:, :, None]
+        elif SCREENING_TYPE.lower() == "dielectric":
+            f1 = 1. / SCREENING_FACTOR 
+        else:
+            raise NotImplementedError(f"Screening type {SCREENING_TYPE} is not implemented.")        
+
         fields = _torch.sum(
-            mesh_data["T1_mesh"] * f1[:, :, None] * q[:, None], axis=1
+            mesh_data["T1_mesh"] * f1 * q[:, None], axis=1
         ).flatten()
 
         mu_ind = _torch.linalg.solve(A, fields)
