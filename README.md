@@ -168,7 +168,7 @@ This can be configured using the `EMLE_DEVICE` environment variable, or by
 using the `--device` argument when launching `emle-server`, e.g.:
 
 ```
-emle-server --backend cuda
+emle-server --device cuda
 ```
 
 When no device is specified, we will preferentially try to use `CUDA` if it is
@@ -177,7 +177,7 @@ to specify the index, e.g. when running on a multi-GPU setup, then you can use
 the following syntax:
 
 ```
-emle-server --backend cuda:1
+emle-server --device cuda:1
 ```
 
 This would tell `PyTorch` that we want to use device index `1`. The same formatting
@@ -343,12 +343,12 @@ python setup.py install
 ```
 
 For instructions on how to use the `emle-sire` interface, see the tutorial
-documentation [here](https://github.com/OpenBioSim/sire/blob/feature_emle/doc/source/tutorial/part08/01_emle.rst).
+documentation [here](https://github.com/OpenBioSim/sire/blob/feature_emle/doc/source/tutorial/partXX/01_emle.rst).
 
 When performing end-state correction simulations using the `emle-sire` interface
 there is no need to specify the `lambda_interpolate` keyword when creating an
 `EMLECalculator` instance. Instead, interpolation can be enabled when creating a
-`Sire` dynamics object via the same keyword. (See the [tutorial](https://github.com/OpenBioSim/sire/blob/feature_emle/doc/source/tutorial/part08/01_eml.rst) for details.)
+`Sire` dynamics object via the same keyword. (See the [tutorial](https://github.com/OpenBioSim/sire/blob/feature_emle/doc/source/tutorial/partXX/01_emle.rst) for details.)
 
 ## Issues
 

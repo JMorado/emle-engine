@@ -379,6 +379,9 @@ class EMLECalculator:
         qm_cutoff=9.0,
         deepmd_model=None,
         deepmd_deviation=None,
+        deepmd_deviation_threshold=None,
+        qm_xyz_file="qm.xyz",
+        qm_xyz_frequency=0,
         rascal_model=None,
         parm7=None,
         qm_indices=None,
@@ -418,7 +421,9 @@ class EMLECalculator:
                     region.
 
         backend: str
-            The backend to use to compute in vacuo energies and gradients.
+            The backend to use to compute in vacuo energies and gradients. If None,
+            then no backend will be used, allowing you to obtain the electrostatic
+            embedding energy and gradients only.
 
         external_backend: str
             The name of an external backend to use to compute in vacuo energies.
@@ -463,6 +468,19 @@ class EMLECalculator:
         deepmd_deviation: str
             Path to a file to write the max deviation between forces predicted
             with the DeePMD models.
+
+        deepmd_deviation_threshold: float
+            The threshold for the maximum deviation between forces predicted with
+            the DeePMD models. If the deviation exceeds this value, a ValueError
+            will be raised and the calculation will be terminated.
+
+        qm_xyz_file: str
+            Path to an output file for writing the xyz trajectory of the QM
+            region.
+
+        qm_xyz_frequency: int
+            How often to write the xyz trajectory of the QM region. Zero turns
+            off writing.
 
         rascal_model: str
             Path to the Rascal model file used to apply delta-learning corrections
@@ -652,19 +670,17 @@ class EMLECalculator:
             _logger.error(msg)
             raise IOError(msg)
 
-        if backend is None:
-            backend = "torchani"
-
-        if not isinstance(backend, str):
-            msg = "'backend' must be of type 'str'"
-            _logger.error(msg)
-            raise TypeError(msg)
-        # Strip whitespace and convert to lower case.
-        backend = backend.lower().replace(" ", "")
-        if not backend in self._supported_backends:
-            msg = f"Unsupported backend '{backend}'. Options are: {', '.join(self._supported_backends)}"
-            _logger.error(msg)
-            raise ValueError(msg)
+        if backend is not None:
+            if not isinstance(backend, str):
+                msg = "'backend' must be of type 'str'"
+                _logger.error(msg)
+                raise TypeError(msg)
+            # Strip whitespace and convert to lower case.
+            backend = backend.lower().replace(" ", "")
+            if not backend in self._supported_backends:
+                msg = f"Unsupported backend '{backend}'. Options are: {', '.join(self._supported_backends)}"
+                _logger.error(msg)
+                raise ValueError(msg)
         self._backend = backend
 
         if external_backend is not None:
@@ -779,6 +795,18 @@ class EMLECalculator:
 
                     self._deepmd_deviation = deepmd_deviation
 
+                    if deepmd_deviation_threshold is not None:
+                        try:
+                            deepmd_deviation_threshold = float(
+                                deepmd_deviation_threshold
+                            )
+                        except:
+                            msg = "'deepmd_deviation_threshold' must be of type 'float'"
+                            _logger.error(msg)
+                            raise TypeError(msg)
+
+                    self._deepmd_deviation_threshold = deepmd_deviation_threshold
+
                 # Store the list of model files, removing any duplicates.
                 self._deepmd_model = list(set(deepmd_model))
                 if len(self._deepmd_model) == 1 and deepmd_deviation:
@@ -804,6 +832,35 @@ class EMLECalculator:
                 msg = "'deepmd_model' must be specified when using the DeePMD backend!"
                 _logger.error(msg)
                 raise ValueError(msg)
+
+            # Set the deviation file to None in case it was spuriously set.
+            self._deepmd_deviation = None
+
+        # Validate the QM XYZ file options.
+
+        if qm_xyz_file is None:
+            qm_xyz_file = "qm.xyz"
+        else:
+            if not isinstance(qm_xyz_file, str):
+                msg = "'qm_xyz_file' must be of type 'str'"
+                _logger.error(msg)
+                raise TypeError(msg)
+        self._qm_xyz_file = qm_xyz_file
+
+        if qm_xyz_frequency is None:
+            qm_xyz_frequency = 0
+        else:
+            try:
+                qm_xyz_frequency = int(qm_xyz_frequency)
+            except:
+                msg = "'qm_xyz_frequency' must be of type 'int'"
+                _logger.error(msg)
+                raise TypeError(msg)
+            if qm_xyz_frequency < 0:
+                msg = "'qm_xyz_frequency' must be greater than or equal to 0"
+                _logger.error(msg)
+                raise ValueError(msg)
+        self._qm_xyz_frequency = qm_xyz_frequency
 
         # Validate the QM method for SQM.
         if backend == "sqm":
@@ -1204,6 +1261,9 @@ class EMLECalculator:
             "mm_charges": None if mm_charges is None else self._mm_charges.tolist(),
             "deepmd_model": deepmd_model,
             "deepmd_deviation": deepmd_deviation,
+            "deepmd_deviation_threshold": deepmd_deviation_threshold,
+            "qm_xyz_file": qm_xyz_file,
+            "qm_xyz_frequency": qm_xyz_frequency,
             "rascal_model": rascal_model,
             "parm7": parm7,
             "qm_indices": None if qm_indices is None else self._qm_indices,
@@ -1319,7 +1379,7 @@ class EMLECalculator:
                     raise RuntimeError(msg)
 
             # DeePMD.
-            if self._backend == "deepmd":
+            elif self._backend == "deepmd":
                 try:
                     E_vac, grad_vac = self._run_deepmd(xyz_qm, elements)
                 except Exception as e:
@@ -1371,6 +1431,10 @@ class EMLECalculator:
                     _logger.error(msg)
                     raise RuntimeError(msg)
 
+            # No backend.
+            else:
+                E_vac, grad_vac = 0.0, _np.zeros_like(xyz_qm)
+
         # External backend.
         else:
             try:
@@ -1383,7 +1447,7 @@ class EMLECalculator:
                 raise RuntimeError(msg)
 
         # Apply delta-learning corrections using Rascal.
-        if self._is_delta:
+        if self._is_delta and self._backend is not None:
             try:
                 delta_E, delta_grad = self._run_rascal(atoms)
             except Exception as e:
@@ -1437,11 +1501,16 @@ class EMLECalculator:
         # Interpolate between the MM and ML/MM potential.
         if self._is_interpolate:
             # Compute the in vacuo MM energy and gradients for the QM region.
-            E_mm_qm_vac, grad_mm_qm_vac = self._run_pysander(
-                atoms=atoms,
-                parm7=self._parm7,
-                is_gas=True,
-            )
+            if self._backend != None:
+                E_mm_qm_vac, grad_mm_qm_vac = self._run_pysander(
+                    atoms=atoms,
+                    parm7=self._parm7,
+                    is_gas=True,
+                )
+
+            # If no backend is specified, then the MM energy and gradients are zero.
+            else:
+                E_mm_qm_vac, grad_mm_qm_vac = 0.0, _np.zeros_like(xyz_qm)
 
             # Swap the method to MM.
             method = self._method
@@ -1530,6 +1599,13 @@ class EMLECalculator:
                     )
                 else:
                     f.write(f"{self._step:>10}{E_vac:22.12f}{E_tot:22.12f}\n")
+
+        # Write out the QM region to the xyz trajectory file.
+        if self._qm_xyz_frequency > 0 and self._step % self._qm_xyz_frequency == 0:
+            atoms = _ase.Atoms(positions=xyz_qm, numbers=atomic_numbers)
+            if hasattr(self, "_max_f_std"):
+                atoms.info = {"max_f_std": self._max_f_std}
+            _ase_io.write(self._qm_xyz_file, atoms, append=True)
 
         # Increment the step counter.
         if self._is_first_step:
@@ -1696,7 +1772,7 @@ class EMLECalculator:
                     raise RuntimeError(msg)
 
             # DeePMD.
-            if self._backend == "deepmd":
+            elif self._backend == "deepmd":
                 try:
                     E_vac, grad_vac = self._run_deepmd(xyz_qm, elements)
                 except Exception as e:
@@ -1750,6 +1826,10 @@ class EMLECalculator:
                     _logger.error(msg)
                     raise RuntimeError(msg)
 
+            # No backend.
+            else:
+                E_vac, grad_vac = 0.0, _np.zeros_like(xyz_qm)
+
         # External backend.
         else:
             try:
@@ -1763,7 +1843,7 @@ class EMLECalculator:
                 raise RuntimeError(msg)
 
         # Apply delta-learning corrections using Rascal.
-        if self._is_delta:
+        if self._is_delta and self._backend is not None:
             try:
                 if atoms is None:
                     atoms = _ase.Atoms(positions=xyz_qm, numbers=atomic_numbers)
@@ -1818,16 +1898,21 @@ class EMLECalculator:
 
         # Interpolate between the MM and ML/MM potential.
         if self._is_interpolate:
-            # Create the ASE atoms object if it wasn't already created by the backend.
-            if atoms is None:
-                atoms = _ase.Atoms(positions=xyz_qm, numbers=atomic_numbers)
-
             # Compute the in vacuo MM energy and gradients for the QM region.
-            E_mm_qm_vac, grad_mm_qm_vac = self._run_pysander(
-                atoms=atoms,
-                parm7=self._parm7,
-                is_gas=True,
-            )
+            if self._backend != None:
+                # Create the ASE atoms object if it wasn't already created by the backend.
+                if atoms is None:
+                    atoms = _ase.Atoms(positions=xyz_qm, numbers=atomic_numbers)
+
+                E_mm_qm_vac, grad_mm_qm_vac = self._run_pysander(
+                    atoms=atoms,
+                    parm7=self._parm7,
+                    is_gas=True,
+                )
+
+            # If no backend is specified, then the MM energy and gradients are zero.
+            else:
+                E_mm_qm_vac, grad_mm_qm_vac = 0.0, _np.zeros_like(xyz_qm)
 
             # Swap the method to MM.
             method = self._method
@@ -2832,10 +2917,11 @@ class EMLECalculator:
         # Reshape to a frames x (natoms x 3) array.
         xyz = xyz.reshape([1, -1])
 
+        e_list = []
         f_list = []
 
         # Run a calculation for each model and take the average.
-        for x, dp in enumerate(self._deepmd_potential):
+        for dp in self._deepmd_potential:
             # Work out the mapping between the elements and the type indices
             # used by the model.
             try:
@@ -2848,25 +2934,33 @@ class EMLECalculator:
             # Now determine the atom types based on the mapping.
             atom_types = [mapping[element] for element in elements]
 
-            if x == 0:
-                energy, force, _ = dp.eval(xyz, cells=None, atom_types=atom_types)
-                f_list.append(force[0])
-            else:
-                e, f, _ = dp.eval(xyz, cells=None, atom_types=atom_types)
-                energy += e
-                force += f
-                f_list.append(f[0])
+            e, f, _ = dp.eval(xyz, cells=None, atom_types=atom_types)
+            e_list.append(e)
+            f_list.append(f)
 
         # Write the maximum DeePMD force deviation to file.
         if self._deepmd_deviation:
-            max_f_std = _np.max(_np.std(_np.array(f_list), axis=0))
+            from deepmd.infer.model_devi import calc_model_devi_f
+
+            max_f_std = calc_model_devi_f(_np.array(f_list))[0][0]
+            if (
+                self._deepmd_deviation_threshold
+                and max_f_std > self._deepmd_deviation_threshold
+            ):
+                msg = "Force deviation threshold reached!"
+                _logger.error(msg)
+                raise ValueError(msg)
             with open(self._deepmd_deviation, "a") as f:
                 f.write(f"{max_f_std:12.5f}\n")
+            # To be written to qm_xyz_file.
+            self._max_f_std = max_f_std
 
         # Take averages and return. (Gradient equals minus the force.)
+        e_mean = _np.mean(_np.array(e_list), axis=0)
+        grad_mean = -_np.mean(_np.array(f_list), axis=0)
         return (
-            (energy[0][0] * _EV_TO_HARTREE) / (x + 1),
-            -(force[0] * _EV_TO_HARTREE * _BOHR_TO_ANGSTROM) / (x + 1),
+            e_mean[0][0] * _EV_TO_HARTREE,
+            grad_mean[0] * _EV_TO_HARTREE * _BOHR_TO_ANGSTROM,
         )
 
     def _run_orca(
