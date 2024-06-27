@@ -10,9 +10,11 @@ that no modifications to sander are needed. The embedding model currently
 supports the HCNOS elements. We plan to add support for further elements
 in the near future.
 
-Further details can be found in our preprint, available [here](https://doi.org/10.26434/chemrxiv-2023-6rng3-v2). Please
+Further details can be found in our paper, available [here](https://pubs.acs.org/doi/10.1021/acs.jctc.4c00248). Please
 cite this work if you use `emle-engine` in your research. Supplementary
-information and data can be found [here](https://github.com/chemle/emle-engine-paper).
+information and data can be found [here](https://github.com/chemle/emle-engine-paper). For
+the original theory behind EMLE, please refer to [this](https://pubs.acs.org/doi/10.1021/acs.jctc.2c00914)
+publication.
 
 ## Installation
 
@@ -343,12 +345,12 @@ python setup.py install
 ```
 
 For instructions on how to use the `emle-sire` interface, see the tutorial
-documentation [here](https://github.com/OpenBioSim/sire/blob/feature_emle/doc/source/tutorial/partXX/01_emle.rst).
+documentation [here](https://github.com/OpenBioSim/sire/blob/feature_emle/doc/source/tutorial/partXX/02_emle.rst).
 
 When performing end-state correction simulations using the `emle-sire` interface
 there is no need to specify the `lambda_interpolate` keyword when creating an
 `EMLECalculator` instance. Instead, interpolation can be enabled when creating a
-`Sire` dynamics object via the same keyword. (See the [tutorial](https://github.com/OpenBioSim/sire/blob/feature_emle/doc/source/tutorial/partXX/01_emle.rst) for details.)
+`Sire` dynamics object via the same keyword. (See the [tutorial](https://github.com/OpenBioSim/sire/blob/feature_emle/doc/source/tutorial/partXX/02_emle.rst) for details.)
 
 ## Issues
 
@@ -379,13 +381,6 @@ number of times before raising an exception. (Sleeping 2 seconds between
 retries.) By default, the client tries will try to connect 100 times. If this
 is unsuitable for your setup, then the number of attempts can be configured
 using the `EMLE_RETRIES` environment variable.
-
-If you are trying to use the [ORCA](https://orcaforum.kofo.mpg.de/index.php) backend in an HPC environment then you'll
-need to make sure that the _fake_ `orca` executable takes precendence in the
-`PATH` set within your batch script, e.g. by making sure that you source the
-`emle` conda environment _after_ loading the `orca` module. It is also important
-to make sure that the `emle` environment isn't active when submitting jobs,
-since the `PATH` won't be updated correctly within the batch script.
 
 When performing interpolation it is currently not possible to use AMBER force
 fields with CMAP terms due to a memory deallocation bug in `pysander`.
