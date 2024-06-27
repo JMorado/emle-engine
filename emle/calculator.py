@@ -75,10 +75,12 @@ _SPHERICAL_EXPANSION_HYPERS_COMMON = {
 }
 
 # Ad-hoc variables that control the scaling of the dipole-charge interactions.
-# Later it would be good to do a proper implementation of these, but for now this hack will work.
 # Default values will run the default EMLE implementation.
-SCREENING_FACTOR = float(_os.getenv("EMLE_SCREENING_FACTOR", 2))
+SCREENING_FACTOR = float(_os.getenv("EMLE_SCREENING_FACTOR", 1))
 SCREENING_TYPE = str(_os.getenv("EMLE_SCREENING_TYPE", "smeared_dipole"))
+ML_MODEL = str(_os.getenv("EMLE_ML_MODEL", "emle_spinv.mat"))
+
+assert isinstance(ML_MODEL, str), "EMLE ML Model must be a path-like string"
 assert isinstance(SCREENING_TYPE, str), "Screening type must be a string"
 assert SCREENING_TYPE in ["smeared_dipole", "dielectric"], "Screening type must be either 'smeared_dipole' or 'dielectric'"
 
@@ -338,7 +340,7 @@ class EMLECalculator:
     _module_dir = _os.path.dirname(_os.path.abspath(__file__))
 
     # Create the name of the default model file.
-    _default_model = _os.path.join(_module_dir, "emle_spinv.mat")
+    _default_model = _os.path.join(_module_dir, ML_MODEL)
 
     # Default ML model parameters. These will be overwritten by values in the
     # embedding model file.
@@ -2204,7 +2206,7 @@ class EMLECalculator:
             f1 = self._get_f1_slater(r, s[:, None] * SCREENING_FACTOR)
             f1 = f1[:, :, None]
         elif SCREENING_TYPE.lower() == "dielectric":
-            f1 = 1. / SCREENING_FACTOR 
+            f1 = SCREENING_FACTOR
         else:
             raise NotImplementedError(f"Screening type {SCREENING_TYPE} is not implemented.")        
 
