@@ -234,7 +234,7 @@ class EMLECalculator:
     }
 
     # Store the list of supported species.
-    _species = [1, 6, 7, 8, 16]
+    _default_species = [1, 6, 7, 8, 16]
 
     # List of supported backends.
     _supported_backends = [
@@ -262,6 +262,7 @@ class EMLECalculator:
     def __init__(
         self,
         model=None,
+        model_species=None,
         method="electrostatic",
         alpha_mode="species",
         backend="torchani",
@@ -296,6 +297,10 @@ class EMLECalculator:
         model: str
             Path to the EMLE embedding model parameter file. If None, then a
             default model will be used.
+
+        model_species: list of int
+            The species indices for which the model was trained. If None, then
+            the default species list is used.
 
         method: str
             The desired embedding method. Options are:
@@ -531,6 +536,22 @@ class EMLECalculator:
         else:
             # Choose the default model based on the alpha mode.
             self._model = self._default_models[self._alpha_mode]
+
+        # Set the species supported by the model.
+        if model_species is not None:
+            if not isinstance(model_species, list):
+                msg = "'model_species' must be of type 'list'"
+                _logger.error(msg)
+                raise TypeError(msg)
+            else:
+                if not all(isinstance(x, int) for x in model_species):
+                    msg = "'model_species' must be a list of 'int' types"
+                    _logger.error(msg)
+                    raise TypeError(msg)
+                else:
+                    self._species = model_species
+        else:
+            self._species = self._default_species
 
         if method is None:
             method = "electrostatic"
@@ -1492,7 +1513,7 @@ class EMLECalculator:
             else:
                 offset = int(not self._restart)
                 lam = self._lambda_interpolate[0] + (
-                    (self._step / (self._interpolate_steps - offset))
+                    self._step / (self._interpolate_steps - offset)
                 ) * (self._lambda_interpolate[1] - self._lambda_interpolate[0])
                 if lam < 0.0:
                     lam = 0.0
@@ -1887,7 +1908,7 @@ class EMLECalculator:
             else:
                 offset = int(not self._restart)
                 lam = self._lambda_interpolate[0] + (
-                    (self._step / (self._interpolate_steps - offset))
+                    self._step / (self._interpolate_steps - offset)
                 ) * (self._lambda_interpolate[1] - self._lambda_interpolate[0])
                 if lam < 0.0:
                     lam = 0.0
