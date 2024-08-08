@@ -76,7 +76,7 @@ class EMLE(_torch.nn.Module):
     """
 
     def __init__(
-        self, alpha_mode="species", device=None, dtype=None, create_aev_calculator=True
+        self, alpha_mode="species", device=None, dtype=None, create_aev_calculator=True, model=None, model_species=None,
     ):
         """
         Constructor
@@ -103,6 +103,12 @@ class EMLE(_torch.nn.Module):
             to False for derived classes that already have an AEV calculator,
             e.g. ANI2xEMLE. In that case, it's possible to hook the AEV
             calculator to avoid duplicating the computation.
+
+        model: str
+            The path to a custom EMLE model parameters file.
+
+        model_species: List[int]
+            The atomic numbers of the species for which the custom model was trained.
         """
 
         # Call the base class constructor.
@@ -125,10 +131,20 @@ class EMLE(_torch.nn.Module):
         self._alpha_mode = alpha_mode
 
         # Choose the model based on the alpha_mode.
-        if alpha_mode == "species":
-            model = _os.path.join(resource_dir, "emle_qm7_aev.mat")
+        if model is None:
+            # Default model paths.
+            if alpha_mode == "species":
+                model = _os.path.join(resource_dir, "emle_qm7_aev.mat")
+            else:
+                model = _os.path.join(resource_dir, "emle_qm7_aev_alphagpr.mat")
         else:
-            model = _os.path.join(resource_dir, "emle_qm7_aev_alphagpr.mat")
+            if not isinstance(model, str):
+                raise TypeError("'model' must be a path of type 'str'")
+            
+            model = _os.path.abspath(model)
+
+            if not _os.path.isfile(model):
+                raise FileNotFoundError(f"Model file not found: '{model}'")
 
         if device is not None:
             if not isinstance(device, _torch.device):
@@ -159,7 +175,10 @@ class EMLE(_torch.nn.Module):
             raise IOError(f"Unable to load model parameters from: '{model}'")
 
         # Set the supported species.
-        species = [1, 6, 7, 8, 16]
+        if model_species is not None:
+            species = model_species
+        else:
+            species = [1, 6, 7, 8, 16]
 
         # Create a map between species and their indices.
         species_map = _np.full(max(species) + 1, fill_value=-1, dtype=_np.int64)
