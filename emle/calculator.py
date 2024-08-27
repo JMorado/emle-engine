@@ -54,6 +54,14 @@ _KCAL_MOL_TO_HARTREE = 1.0 / _ase.units.Hartree * _ase.units.kcal / _ase.units.m
 _HARTREE_TO_KJ_MOL = _ase.units.Hartree / _ase.units.kJ * _ase.units.mol
 _NANOMETER_TO_ANGSTROM = 10.0
 
+# Ad-hoc variables that control the scaling of the dipole-charge interactions.
+# Default values will run the default EMLE implementation.
+SCREENING_FACTOR = float(_os.getenv("EMLE_SCREENING_FACTOR", 1.0))
+SCREENING_TYPE = str(_os.getenv("EMLE_SCREENING_TYPE", "smeared_dipole"))
+
+assert SCREENING_FACTOR > 1.0, "Screening factor must be greater than 1.0"
+assert isinstance(SCREENING_TYPE, str), "Screening type must be a string"
+assert SCREENING_TYPE in ["smeared_dipole", "dielectric"], "Screening type must be either 'smeared_dipole' or 'dielectric'"
 
 class _AEVCalculator:
     """
@@ -2266,7 +2274,15 @@ class EMLECalculator:
         A = self._get_A_thole(r_data, s, q_val, k)
 
         r = 1.0 / mesh_data["T0_mesh"]
-        f1 = self._get_f1_slater(r, s[:, None] * 2.0)
+
+        if SCREENING_TYPE.lower() == "smeared_dipole":
+            f1 = self._get_f1_slater(r, s[:, None] * SCREENING_FACTOR)
+            f1 = f1[:, :, None]
+        elif SCREENING_TYPE.lower() == "dielectric":
+            f1 = 1.0 / SCREENING_FACTOR
+        else:
+            raise NotImplementedError(f"Screening type {SCREENING_TYPE} is not implemented.")        
+
         fields = _torch.sum(
             mesh_data["T1_mesh"] * f1[:, :, None] * q[:, None], axis=1
         ).flatten()
