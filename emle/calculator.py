@@ -59,7 +59,7 @@ _NANOMETER_TO_ANGSTROM = 10.0
 SCREENING_FACTOR = float(_os.getenv("EMLE_SCREENING_FACTOR", 1.0))
 SCREENING_TYPE = str(_os.getenv("EMLE_SCREENING_TYPE", "smeared_dipole"))
 
-assert SCREENING_FACTOR > 1.0, "Screening factor must be greater than 1.0"
+assert SCREENING_FACTOR >= 1.0, "Screening factor must be greater or equal than 1.0"
 assert isinstance(SCREENING_TYPE, str), "Screening type must be a string"
 assert SCREENING_TYPE in ["smeared_dipole", "dielectric"], "Screening type must be either 'smeared_dipole' or 'dielectric'"
 
