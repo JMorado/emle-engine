@@ -2284,9 +2284,9 @@ class EMLECalculator:
             raise NotImplementedError(f"Screening type {SCREENING_TYPE} is not implemented.")        
 
         fields = _torch.sum(
-            mesh_data["T1_mesh"] * f1[:, :, None] * q[:, None], axis=1
+            mesh_data["T1_mesh"] * f1 * q[:, None], axis=1
         ).flatten()
-
+   
         mu_ind = _torch.linalg.solve(A, fields)
         return mu_ind.reshape((-1, 3))
 
