@@ -2231,7 +2231,7 @@ class EMLECalculator:
             f1 = self._get_f1_slater(r, s[:, None] * SCREENING_FACTOR)
             f1 = f1[:, :, None]
         elif SCREENING_TYPE.lower() == "dielectric":
-            f1 = SCREENING_FACTOR
+            f1 = 1.0 / SCREENING_FACTOR
         else:
             raise NotImplementedError(f"Screening type {SCREENING_TYPE} is not implemented.")        
 
