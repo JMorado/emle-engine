@@ -1521,7 +1521,7 @@ class EMLECalculator:
         )
 
         # Compute the total energy and gradients.
-        E_tot = E + E_vac
+        E_tot = E_vac + E.detach().cpu().numpy()
         grad_qm = dE_dxyz_qm_bohr + grad_vac
         grad_mm = dE_dxyz_mm_bohr.cpu().numpy()
 
@@ -1559,7 +1559,7 @@ class EMLECalculator:
             self._method = method
 
             # Store the the MM and EMLE energies. The MM energy is an approximation.
-            E_mm = E_mm_qm_vac + E
+            E_mm = E_mm_qm_vac + E.detach().cpu().numpy()
             E_emle = E_tot
 
             # Work out the current value of lambda.
@@ -1927,7 +1927,7 @@ class EMLECalculator:
         )
 
         # Compute the total energy and gradients.
-        E_tot = E + E_vac
+        E_tot = E_vac + E.detach().cpu().numpy()
         grad_qm = dE_dxyz_qm_bohr + grad_vac
         grad_mm = dE_dxyz_mm_bohr.cpu().numpy()
 
@@ -1969,7 +1969,7 @@ class EMLECalculator:
             self._method = method
 
             # Store the the MM and EMLE energies. The MM energy is an approximation.
-            E_mm = E_mm_qm_vac + E
+            E_mm = E_mm_qm_vac + E.detach().cpu().numpy()
             E_emle = E_tot
 
             # Work out the current value of lambda.
@@ -2107,13 +2107,13 @@ class EMLECalculator:
             q_val = _torch.zeros_like(q_core, dtype=_torch.float32, device=self._device)
         else:
             q_val = _torch.zeros_like(q_core, dtype=_torch.float32, device=self._device)
-        mu_ind = self._get_mu_ind(r_data, mesh_data, charges_mm, s, q_val, k_Z)
         vpot_q_core = self._get_vpot_q(q_core, mesh_data["T0_mesh"])
         vpot_q_val = self._get_vpot_q(q_val, mesh_data["T0_mesh_slater"])
         vpot_static = vpot_q_core + vpot_q_val
         E_static = _torch.sum(vpot_static @ charges_mm)
 
         if self._method == "electrostatic":
+            mu_ind = self._get_mu_ind(r_data, mesh_data, charges_mm, s, q_val, k_Z)
             vpot_ind = self._get_vpot_mu(mu_ind, mesh_data["T1_mesh"])
             E_ind = _torch.sum(vpot_ind @ charges_mm) * 0.5
         else:
@@ -2240,7 +2240,6 @@ class EMLECalculator:
         ).flatten()
 
         mu_ind = _torch.linalg.solve(A, fields)
-        E_ind = mu_ind @ fields * 0.5
         return mu_ind.reshape((-1, 3))
 
     def _get_A_thole(self, r_data, s, q_val, k_Z):
