@@ -56,7 +56,7 @@ _NANOMETER_TO_ANGSTROM = 10.0
 
 # Ad-hoc variables that control the scaling of the dipole-charge interactions.
 # Default values will run the default EMLE implementation.
-SCREENING_FACTOR = float(_os.getenv("EMLE_SCREENING_FACTOR", 1.0))
+SCREENING_FACTOR = float(_os.getenv("EMLE_SCREENING_FACTOR", 2.0))
 SCREENING_TYPE = str(_os.getenv("EMLE_SCREENING_TYPE", "smeared_dipole"))
 
 assert SCREENING_FACTOR >= 1.0, "Screening factor must be greater or equal than 1.0"
@@ -1688,7 +1688,7 @@ class EMLECalculator:
         charges_mm = _np.array(charges_mm)
         xyz_qm = _np.array(xyz_qm)
         xyz_mm = _np.array(xyz_mm)
-
+        
         # Initialise a null ASE atoms object.
         atoms = None
 
