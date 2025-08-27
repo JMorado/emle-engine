@@ -528,7 +528,6 @@ class EMLE(_torch.nn.Module):
             sigma_mm[charges_mm == -0.834] = 0.7679741  
             sigma_mm[charges_mm == 0.417] = 0.67188119 
             sigma_mm *= self._emle_base.a_QEq
-            sigma_mm = sigma_mm.unsqueeze(0)
         else:
             sigma_mm = None
             sigma_qm = None
@@ -539,6 +538,8 @@ class EMLE(_torch.nn.Module):
    
         # Compute the induced energy.
         if self._method == "electrostatic":
+            sigma_mm = None
+            sigma_qm = None
             E_ind = self._emle_base.get_induced_energy(
                 A_thole, self._charges_mm, s, mesh_data, mask, sigma_qm, sigma_mm
             )
@@ -546,5 +547,4 @@ class EMLE(_torch.nn.Module):
             E_ind = _torch.zeros_like(
                 E_static, dtype=self._charges_mm.dtype, device=self._device
             )
-
-        return _torch.stack((E_static, E_ind), dim=0)
+        return _torch.stack((E_static, E_ind, _torch.zeros_like(E_static)), dim=0)

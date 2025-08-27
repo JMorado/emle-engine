@@ -937,11 +937,10 @@ class EMLEBase(_torch.nn.Module):
                 field_components * q[:, None, :, None], dim=2
             )
 
-        fields_flat = fields_sum.reshape(1, -1)
+        fields_flat = fields_sum.reshape(q.shape[0], -1).unsqueeze(-1)
         mu_ind_flat = _torch.linalg.solve(A, fields_flat)
         mu_ind = mu_ind_flat.reshape((mu_ind_flat.shape[0], -1, 3))
-        
-        return mu_ind, fields_flat
+        return mu_ind, fields_flat.squeeze()
 
     @staticmethod
     def _get_vpot_q(q, T0):
