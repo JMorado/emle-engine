@@ -88,7 +88,7 @@ class EMLE(_torch.nn.Module):
         mm_charges=None,
         device=None,
         dtype=None,
-        charge_penetration="slater",
+        charge_penetration="gaussian",
         create_aev_calculator=True,
     ):
         """
@@ -561,7 +561,7 @@ class EMLE(_torch.nn.Module):
             elif self._charge_penetration == "gaussian":
                 q_core_mm = self._charges_mm
                 q_val_mm = None
-                sigma_mm = s_mm * self._emle_base.a_QEq
+                sigma_mm = s_mm * self._emle_base.a_QEq * ANGSTROM_TO_BOHR
                 sigma_qm = s * self._emle_base.a_QEq
         else:
             sigma_mm = None
