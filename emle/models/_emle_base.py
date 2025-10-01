@@ -863,7 +863,7 @@ class EMLEBase(_torch.nn.Module):
         sqrt2 = _torch.sqrt(_torch.tensor([2.0], dtype=r.dtype, device=r.device))
         sigma_sum = _torch.sqrt(sigma_qm[:, :, None]**2 + sigma_mm[:, None, :]**2)
         return _torch.where(
-            sigma_sum > 0, _torch.erf(r / ((sigma_sum + 1e-16) * sqrt2)), 0.0
+            sigma_sum > 0, _torch.erf(r / ((sigma_sum + 1e-16) * sqrt2)) / (r + 1e-16), 0.0
         )
         
     @staticmethod
