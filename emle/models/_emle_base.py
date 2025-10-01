@@ -968,6 +968,7 @@ class EMLEBase(_torch.nn.Module):
         s: Tensor,
         mesh_data: Tuple[Tensor, Tensor, Tensor],
         mask: Tensor,
+        sigma_mm: Tensor | None = None
     ) -> Tensor:
         """
         Calculate the induced electrostatic energy.
@@ -990,63 +991,65 @@ class EMLEBase(_torch.nn.Module):
         mask: torch.Tensor (N_BATCH, MAX_QM_ATOMS)
             Mask for padded coordinates.
 
+        sigma_mm: torch.Tensor (N_BATCH, MAX_MM_ATOMS) | None
+            Gaussian widths for MM atoms (if using Gaussian smearing for MM).
+
         Returns
         -------
 
         result: torch.Tensor (N_BATCH,)
             Induced electrostatic energy.
         """
-        mu_ind = EMLEBase._get_mu_ind(A_thole, mesh_data, charges_mm, s, mask)
-        vpot_ind = EMLEBase._get_vpot_mu(mu_ind, mesh_data[2])
-        return _torch.sum(vpot_ind * charges_mm, dim=1) * 0.5
+        mu_ind, fields = EMLEBase._get_mu_ind(A_thole, mesh_data, charges_mm, s, mask, sigma_mm)
+        if sigma_mm is not None:
+            mu_ind_flat = mu_ind.reshape(mu_ind.shape[0], -1)
+            return -_torch.sum(mu_ind_flat * fields, dim=1) * 0.5
+        else:
+            vpot_ind = EMLEBase._get_vpot_mu(mu_ind, mesh_data[2])
+            return _torch.sum(vpot_ind * charges_mm, dim=1) * 0.5
 
     @staticmethod
     def _get_mu_ind(
-        A: Tensor,
-        mesh_data: Tuple[Tensor, Tensor, Tensor],
-        q: Tensor,
-        s: Tensor,
-        mask: Tensor,
-    ) -> Tensor:
+        A: _torch.Tensor,
+        mesh_data: tuple[_torch.Tensor, _torch.Tensor, _torch.Tensor],
+        q: _torch.Tensor,
+        s: _torch.Tensor,
+        mask: _torch.Tensor,
+        sigma_mm: _torch.Tensor | None = None,
+    ) -> tuple[_torch.Tensor, _torch.Tensor]:
         """
-        Internal method, calculates induced atomic dipoles
-        (Eq. 20 in 10.1021/acs.jctc.2c00914)
-
-        Parameters
-        ----------
-
-        A: torch.Tensor (N_BATCH, MAX_QM_ATOMS * 3, MAX_QM_ATOMS * 3)
-            The A matrix for induced dipoles prediction.
-
-        mesh_data: mesh_data object (output of self._get_mesh_data)
-
-        q: torch.Tensor (N_BATCH, MAX_MM_ATOMS,)
-            MM point charges.
-
-        s: torch.Tensor (N_BATCH, N_QM_ATOMS,)
-            MBIS valence shell widths.
-
-        q_val: torch.Tensor (N_BATCH, N_QM_ATOMS,)
-            MBIS valence charges.
-
-        mask: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            Mask for padded coordinates.
-
-        Returns
-        -------
-
-        result: torch.Tensor (N_BATCH, MAX_QM_ATOMS, 3)
-            Array of induced dipoles
+        Internal method: calculates induced atomic dipoles.
+        Returns both the dipoles and the inducing field.
         """
+        distances_inv, _, field_components = mesh_data
+        eps = 1e-16
 
-        r = 1.0 / mesh_data[0]
-        f1 = _torch.where(mask, EMLEBase._get_f1_slater(r, s[:, :, None] * 2.0), 0.0)
-        fields = _torch.sum(
-            mesh_data[2] * q[:, None, :, None], dim=2
-        ).reshape(len(s), -1)
+        if sigma_mm is not None:
+            # Safe distances
+            distances = 1.0 / (distances_inv + eps)
+            r_safe = distances + eps
+            sigma_safe = sigma_mm[:, None, :] + eps
 
-        mu_ind = _torch.linalg.solve(A, fields)
-        return mu_ind.reshape((mu_ind.shape[0], -1, 3))
+            # Damping factor
+            r_over_sigma = r_safe / sigma_safe
+            sqrt2 = _torch.sqrt(_torch.tensor(2.0, device=r_safe.device, dtype=r_safe.dtype))
+            sqrt2_pi = _torch.sqrt(_torch.tensor(2.0 / _torch.pi, device=r_safe.device, dtype=r_safe.dtype))
+            term1 = _torch.erf(r_over_sigma / sqrt2)
+            term2 = sqrt2_pi * r_over_sigma * _torch.exp(-0.5 * r_over_sigma**2)
+            gaussian_damp = term1 - term2
+
+            damped_field = field_components * gaussian_damp.unsqueeze(-1)
+            fields_sum = _torch.einsum("bijf,bj->bif", damped_field, q)
+        else:
+            fields_sum = _torch.einsum("bijf,bj->bif", field_components, q)
+
+        # Flatten fields and solve for induced dipoles
+        fields_flat = fields_sum.reshape(q.shape[0], -1, 1)       
+        mu_ind_flat = _torch.linalg.solve(A, fields_flat)           
+        mu_ind = mu_ind_flat.view(q.shape[0], -1, 3)                
+
+        return mu_ind, fields_flat.squeeze(-1)
+
 
     @staticmethod
     def _get_vpot_q(q, T0):
