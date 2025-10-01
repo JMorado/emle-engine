@@ -547,7 +547,8 @@ class EMLE(_torch.nn.Module):
             # Calculate the valence widths and core charges for the MM atoms.
             species_id_mm = self._emle_base._species_map[atomic_numbers_mm]
             aev_mm = self._emle_base._emle_aev_computer(species_id_mm, self._xyz_mm)
-            s_mm = self._emle_base._gpr(aev_mm, self._emle_base._ref_mean_s, 
+            s_mm = self._emle_base._gpr(aev_mm, 
+                                        self._emle_base._ref_mean_s, 
                                         self._emle_base._c_s, 
                                         species_id_mm)
 

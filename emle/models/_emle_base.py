@@ -833,12 +833,6 @@ class EMLEBase(_torch.nn.Module):
                     q_core, q_val, q_core_mm, mesh_data, sigma_qm, sigma_mm
                 )
             else:
-                print("q_core_qm", q_core)
-                print("q_val_qm", q_val)
-                print("q_core_mm", q_core_mm)
-                print("q_val_mm", q_val_mm)
-                print("sigma_qm", sigma_qm)
-                print("sigma_mm", sigma_mm)
                 return EMLEBase.get_static_energy_cp_slater(
                     q_core, q_val, q_core_mm, q_val_mm, mesh_data, sigma_qm, sigma_mm
                 )
@@ -868,8 +862,10 @@ class EMLEBase(_torch.nn.Module):
         """
         sqrt2 = _torch.sqrt(_torch.tensor([2.0], dtype=r.dtype, device=r.device))
         sigma_sum = _torch.sqrt(sigma_qm[:, :, None]**2 + sigma_mm[:, None, :]**2)
-        return _torch.erf(r / ((sigma_sum + 1e-16) * sqrt2)) / (r + 1e-16)
-
+        return _torch.where(
+            sigma_sum > 0, _torch.erf(r / ((sigma_sum + 1e-16) * sqrt2)), 0.0
+        )
+        
     @staticmethod
     def get_static_energy_cp_gaussian(q_core, q_val, charges_mm, mesh_data, sigma_qm, sigma_mm):
         """
@@ -927,7 +923,7 @@ class EMLEBase(_torch.nn.Module):
         mask_mm = (q_core_mm != 0.0).unsqueeze(-1)
         T0_slater_mm = _torch.where(mask_mm, EMLEBase._get_T0_slater(r.permute(0, 2, 1), s_mm[:, :, None]), 0.0)
         vpot_val_mm = EMLEBase._get_vpot_q(q_val_mm, T0_slater_mm)
- 
+
         # ZiZj/r (MM PC - QM PC)
         v_core_core = _torch.sum(vpot_core_qm * q_core_mm, dim=1)
         # qiZj/r * fdamp (MM Slater - QM PC)
@@ -963,12 +959,7 @@ class EMLEBase(_torch.nn.Module):
             slater_potential(q_val_qm, q_val_mm, r, s_qm, s_mm), dim=(1,2)
         )
 
-        print("v_val_val:", v_val_val)
-        print("v_core_val:", v_core_val)
-        print("v_val_core:", v_val_core)
-        print("v_core_core:", v_core_core)
-
-        return v_core_core + v_val_core + v_core_val + v_val_val
+        return (v_core_core + v_val_core + v_core_val + v_val_val)
 
     @staticmethod
     def get_induced_energy(
