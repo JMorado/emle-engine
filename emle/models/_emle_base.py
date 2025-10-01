@@ -527,7 +527,7 @@ class EMLEBase(_torch.nn.Module):
 
         rr_mat = xyz[:, :, None, :] - xyz[:, None, :, :]
         r_mat = _torch.where(mask_mat, _torch.cdist(xyz, xyz), 0.0)
-        r_inv = _torch.where(r_mat == 0.0, 0.0, 1.0 / r_mat)
+        r_inv = _torch.where(r_mat <= 1e-16, 0.0, 1.0 / (r_mat + 1e-16))
 
         r_inv1 = r_inv.repeat_interleave(3, dim=2)
         r_inv2 = r_inv1.repeat_interleave(3, dim=1)

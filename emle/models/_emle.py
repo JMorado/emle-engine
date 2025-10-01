@@ -54,6 +54,8 @@ try:
 except:
     _has_nnpops = False
 
+_torch.autograd.set_detect_anomaly(True)
+
 
 class EMLE(_torch.nn.Module):
     """

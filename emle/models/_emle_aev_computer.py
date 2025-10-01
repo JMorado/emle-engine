@@ -234,8 +234,13 @@ class EMLEAEVComputer(_torch.nn.Module):
             aev = self._aev
 
         norm = _torch.linalg.norm(aev, dim=2, keepdim=True)
+        
+        # Add small epsilon to prevent division by zero or near-zero values
+        # that can cause NaN gradients during backpropagation
+        eps = 1e-16
+        safe_norm = _torch.where(norm <= eps, 1.0, norm + eps)
 
-        aev = self._apply_mask(_torch.where(zid[:, :, None] > -1, aev / norm, 0.0))
+        aev = self._apply_mask(_torch.where(zid[:, :, None] > -1, aev / safe_norm, 0.0))
 
         return aev
 
