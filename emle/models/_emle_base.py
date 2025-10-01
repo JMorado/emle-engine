@@ -788,7 +788,8 @@ class EMLEBase(_torch.nn.Module):
     def get_static_energy(
         q_core: Tensor,
         q_val: Tensor,
-        charges_mm: Tensor,
+        q_core_mm: Tensor,
+        q_val_mm: Tensor,
         mesh_data: Tuple[Tensor, Tensor, Tensor],
         sigma_qm: Tensor = None,
         sigma_mm: Tensor = None,
@@ -805,11 +806,20 @@ class EMLEBase(_torch.nn.Module):
         q_val: torch.Tensor (N_BATCH, N_QM_ATOMS,)
             QM valence charges.
 
-        charges_mm: torch.Tensor (N_BATCH, N_MM_ATOMS,)
+        q_core_mm: torch.Tensor (N_BATCH, N_MM_ATOMS,)
+            MM charges.
+
+        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS,)
             MM charges.
 
         mesh_data: mesh_data object (output of self._get_mesh_data)
             Mesh data object.
+
+        sigma_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Gaussian widths for QM atoms or Slater widths for QM atoms.
+
+        sigma_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Gaussian widths for MM atoms or Slater widths for MM atoms.
 
         Returns
         -------
@@ -817,16 +827,27 @@ class EMLEBase(_torch.nn.Module):
         result: torch.Tensor (N_BATCH,)
             Static electrostatic energy.
         """
-        if sigma_qm is not None or sigma_mm is not None:
-            return EMLEBase.get_static_energy_cp(
-                q_core, q_val, charges_mm, mesh_data, sigma_qm, sigma_mm
-            )
+        if sigma_qm is not None and sigma_mm is not None:
+            if q_val_mm is None:
+                return EMLEBase.get_static_energy_cp_gaussian(
+                    q_core, q_val, q_core_mm, mesh_data, sigma_qm, sigma_mm
+                )
+            else:
+                print("q_core_qm", q_core)
+                print("q_val_qm", q_val)
+                print("q_core_mm", q_core_mm)
+                print("q_val_mm", q_val_mm)
+                print("sigma_qm", sigma_qm)
+                print("sigma_mm", sigma_mm)
+                return EMLEBase.get_static_energy_cp_slater(
+                    q_core, q_val, q_core_mm, q_val_mm, mesh_data, sigma_qm, sigma_mm
+                )
         else:
             vpot_q_core = EMLEBase._get_vpot_q(q_core, mesh_data[0])
             vpot_q_val = EMLEBase._get_vpot_q(q_val, mesh_data[1])
             vpot_static = vpot_q_core + vpot_q_val
-            return _torch.sum(vpot_static * charges_mm, dim=1)
-
+            return _torch.sum(vpot_static * q_core_mm, dim=1)
+ 
     @staticmethod
     def _get_T0_cp(r: Tensor, sigma_qm: Tensor, sigma_mm: Tensor) -> Tensor:
         """
@@ -850,7 +871,7 @@ class EMLEBase(_torch.nn.Module):
         return _torch.erf(r / ((sigma_sum + 1e-16) * sqrt2)) / (r + 1e-16)
 
     @staticmethod
-    def get_static_energy_cp(q_core, q_val, charges_mm, mesh_data, sigma_qm, sigma_mm):
+    def get_static_energy_cp_gaussian(q_core, q_val, charges_mm, mesh_data, sigma_qm, sigma_mm):
         """
         Calculate the static electrostatic energy with charge penetration.
 
@@ -877,30 +898,116 @@ class EMLEBase(_torch.nn.Module):
         return _torch.sum(vpot_static * charges_mm, dim=1)
 
     @staticmethod
+    def get_static_energy_cp_slater(q_core_qm, q_val_qm, q_core_mm, q_val_mm, mesh_data, s_qm, s_mm):
+        """
+        Calculate the static electrostatic energy with charge penetration.
+
+        Parameters
+        ----------
+
+        q_core_qm: torch.Tensor (N_BATCH, N_QM_ATOMS,)
+            QM core charges.
+        q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS,)
+            QM valence charges.
+        q_core_mm: torch.Tensor (N_BATCH, N_MM_ATOMS,)
+            MM core charges.
+        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS,)
+            MM valence charges.
+        mesh_data: mesh_data object (output of self._get_mesh_data)
+            Mesh data object.
+        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Slater widths for QM atoms.
+        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Slater widths for MM atoms.
+        """
+        r = 1.0 / mesh_data[0]
+
+        vpot_core_qm = EMLEBase._get_vpot_q(q_core_qm, mesh_data[0])
+        vpot_val_qm = EMLEBase._get_vpot_q(q_val_qm, mesh_data[1])
+        mask_mm = (q_core_mm != 0.0).unsqueeze(-1)
+        T0_slater_mm = _torch.where(mask_mm, EMLEBase._get_T0_slater(r.permute(0, 2, 1), s_mm[:, :, None]), 0.0)
+        vpot_val_mm = EMLEBase._get_vpot_q(q_val_mm, T0_slater_mm)
+ 
+        # ZiZj/r (MM PC - QM PC)
+        v_core_core = _torch.sum(vpot_core_qm * q_core_mm, dim=1)
+        # qiZj/r * fdamp (MM Slater - QM PC)
+        v_val_core = _torch.sum(vpot_val_qm * q_core_mm, dim=1)
+        # Ziqj/r * fdamp (MM PC - QM Slater)
+        v_core_val = _torch.sum(vpot_val_mm * q_core_qm, dim=1)
+        
+        def slater_potential(q_val_qm, q_val_mm, r, s_qm, s_mm, tol=1e-4):
+            qi = q_val_qm[:, :, None]
+            qj = q_val_mm[:, None, :]
+            si = s_qm[:, :, None]
+            sj = s_mm[:, None, :]
+
+            diff2 = si**2 - sj**2
+
+            # si==sj formula
+            term_equal = _torch.exp(-r/sj) * (r**3 + 9*r**2*sj + 33*r*sj**2 + 48*sj**3) / sj**3
+            expr_equal = qi * qj * (48 - term_equal) / (48 * r)
+
+            # si!=sj formula
+            term1 = 2*diff2**3
+            term2 = sj**3 * _torch.exp(-r/sj) * (r*(sj**2 - si**2) - 6*si**2*sj + 2*sj**3)
+            term3 = si**3 * _torch.exp(-r/si) * (sj**2*(r + 6*si) - si**2*(r + 2*si))
+            numerator = qi * qj * (term1 + term2 + term3)
+            denominator = 2 * r * diff2**3
+            expr_general = numerator / denominator
+
+            potential = _torch.where(_torch.abs(si - sj) < tol, expr_equal, expr_general)
+            return potential
+        
+        # qi qj / r * foverlap (MM Slater - QM Slater)
+        v_val_val = _torch.sum(
+            slater_potential(q_val_qm, q_val_mm, r, s_qm, s_mm), dim=(1,2)
+        )
+
+        print("v_val_val:", v_val_val)
+        print("v_core_val:", v_core_val)
+        print("v_val_core:", v_val_core)
+        print("v_core_core:", v_core_core)
+
+        return v_core_core + v_val_core + v_core_val + v_val_val
+
+    @staticmethod
     def get_induced_energy(
         A_thole: Tensor,
         charges_mm: Tensor,
         s: Tensor,
         mesh_data: Tuple[Tensor, Tensor, Tensor],
         mask: Tensor,
-        sigma_qm: Tensor = None,
-        sigma_mm: Tensor = None,
     ) -> Tensor:
         """
         Calculate the induced electrostatic energy.
-        """
-        # This function now correctly passes parameters to _get_mu_ind
-        # which handles both smeared (if sigma_mm is provided) and non-smeared cases.
-        mu_ind, fields = EMLEBase._get_mu_ind(
-            A_thole, mesh_data, charges_mm, s, mask, sigma_mm
-        )
 
-        if sigma_mm is not None:
-            mu_ind_flat = mu_ind.reshape(mu_ind.shape[0], -1)
-            return -_torch.sum(mu_ind_flat * fields, dim=1) * 0.5
-        else:
-            vpot_ind = EMLEBase._get_vpot_mu(mu_ind, mesh_data[2])
-            return _torch.sum(vpot_ind * charges_mm, dim=1) * 0.5
+        Parameters
+        ----------
+
+        A_thole: torch.Tensor (N_BATCH, MAX_QM_ATOMS * 3, MAX_QM_ATOMS * 3)
+            The A matrix for induced dipoles prediction.
+
+        charges_mm: torch.Tensor (N_BATCH, MAX_MM_ATOMS,)
+            MM charges.
+
+        s: torch.Tensor (N_BATCH, MAX_QM_ATOMS,)
+            MBIS valence shell widths.
+
+        mesh_data: mesh_data object (output of self._get_mesh_data)
+            Mesh data object.
+
+        mask: torch.Tensor (N_BATCH, MAX_QM_ATOMS)
+            Mask for padded coordinates.
+
+        Returns
+        -------
+
+        result: torch.Tensor (N_BATCH,)
+            Induced electrostatic energy.
+        """
+        mu_ind = EMLEBase._get_mu_ind(A_thole, mesh_data, charges_mm, s, mask)
+        vpot_ind = EMLEBase._get_vpot_mu(mu_ind, mesh_data[2])
+        return _torch.sum(vpot_ind * charges_mm, dim=1) * 0.5
 
     @staticmethod
     def _get_mu_ind(
@@ -909,38 +1016,46 @@ class EMLEBase(_torch.nn.Module):
         q: Tensor,
         s: Tensor,
         mask: Tensor,
-        sigma_mm: Tensor = None,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> Tensor:
         """
-        Internal method, calculates induced atomic dipoles.
-        Returns both the dipoles and the field that induced them.
+        Internal method, calculates induced atomic dipoles
+        (Eq. 20 in 10.1021/acs.jctc.2c00914)
+
+        Parameters
+        ----------
+
+        A: torch.Tensor (N_BATCH, MAX_QM_ATOMS * 3, MAX_QM_ATOMS * 3)
+            The A matrix for induced dipoles prediction.
+
+        mesh_data: mesh_data object (output of self._get_mesh_data)
+
+        q: torch.Tensor (N_BATCH, MAX_MM_ATOMS,)
+            MM point charges.
+
+        s: torch.Tensor (N_BATCH, N_QM_ATOMS,)
+            MBIS valence shell widths.
+
+        q_val: torch.Tensor (N_BATCH, N_QM_ATOMS,)
+            MBIS valence charges.
+
+        mask: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Mask for padded coordinates.
+
+        Returns
+        -------
+
+        result: torch.Tensor (N_BATCH, MAX_QM_ATOMS, 3)
+            Array of induced dipoles
         """
-        distances_inv, _, field_components = mesh_data
 
-        if sigma_mm is not None:
-            distances = 1.0 / (distances_inv + 1e-16)
-            
-            r_safe = distances + 1e-16
-            sigma_safe = sigma_mm[:, None, :] + 1e-16
-            sqrt2 = _torch.sqrt(_torch.tensor([2.0], dtype=r_safe.dtype, device=r_safe.device))
-            sqrt2_pi = _torch.sqrt(_torch.tensor([2.0 / _torch.pi], dtype=r_safe.dtype, device=r_safe.device))
-            r_over_sigma_std = r_safe / sigma_safe
-            term1 = _torch.erf(r_over_sigma_std / sqrt2)
-            term2 = sqrt2_pi * r_over_sigma_std * _torch.exp(-0.5 * r_over_sigma_std**2)
-            gaussian_damp = term1 - term2
-            damped_field_components = field_components * gaussian_damp.unsqueeze(-1)
-            fields_sum = _torch.sum(
-                damped_field_components * q[:, None, :, None], dim=2
-            )
-        else:
-            fields_sum = _torch.sum(
-                field_components * q[:, None, :, None], dim=2
-            )
+        r = 1.0 / mesh_data[0]
+        f1 = _torch.where(mask, EMLEBase._get_f1_slater(r, s[:, :, None] * 2.0), 0.0)
+        fields = _torch.sum(
+            mesh_data[2] * q[:, None, :, None], dim=2
+        ).reshape(len(s), -1)
 
-        fields_flat = fields_sum.reshape(q.shape[0], -1).unsqueeze(-1)
-        mu_ind_flat = _torch.linalg.solve(A, fields_flat)
-        mu_ind = mu_ind_flat.reshape((mu_ind_flat.shape[0], -1, 3))
-        return mu_ind, fields_flat.squeeze()
+        mu_ind = _torch.linalg.solve(A, fields)
+        return mu_ind.reshape((mu_ind.shape[0], -1, 3))
 
     @staticmethod
     def _get_vpot_q(q, T0):

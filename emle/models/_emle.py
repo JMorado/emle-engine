@@ -88,7 +88,7 @@ class EMLE(_torch.nn.Module):
         mm_charges=None,
         device=None,
         dtype=None,
-        charge_penetration=True,
+        charge_penetration="slater",
         create_aev_calculator=True,
     ):
         """
@@ -141,9 +141,17 @@ class EMLE(_torch.nn.Module):
         device: torch.device
             The device on which to run the model.
 
-        charge_penetration: bool
+        charge_penetration: str
             Whether to include charge penetration effects when computing
-            the ML-MM electrostatic and induction interactions.
+            the ML-MM electrostatic and induction interactions. 
+            Options are:
+                "slater": include charge penetration effects using Slater
+                          functions to model the electron density.
+                "gaussian": include charge penetration effects using
+                            Gaussian functions to model the electron density.
+                None: do not include charge penetration effects.
+            Note that charge penetration is only available for the 'electrostatic'
+            and 'nonpol' methods.
 
         dtype: torch.dtype
             The data type to use for the models floating point tensors.
@@ -288,7 +296,14 @@ class EMLE(_torch.nn.Module):
         else:
             q_core_mm = _torch.empty(0, dtype=dtype, device=device)
 
-        if isinstance(charge_penetration, bool):
+        if not charge_penetration:
+            self._charge_penetration = None
+        elif isinstance(charge_penetration, str):
+            charge_penetration = charge_penetration.lower().replace(" ", "")
+            if charge_penetration not in ["slater", "gaussian"]:
+                raise ValueError(
+                    "'charge_penetration' must be 'slater' or 'gaussian'."
+                )
             self._charge_penetration = charge_penetration
         else:
             raise TypeError("'charge_penetration' must be of type 'bool'")
@@ -521,27 +536,46 @@ class EMLE(_torch.nn.Module):
             )
 
         if self._charge_penetration and self._method in ["electrostatic", "nonpol"]:
-            # Charge penetration is only available for the electrostatic and
-            # non-polarisable methods.
-            sigma_qm = s * self._emle_base.a_QEq
-            sigma_mm = charges_mm.clone()
-            sigma_mm[charges_mm == -0.834] = 0.7679741  
-            sigma_mm[charges_mm == 0.417] = 0.67188119 
-            sigma_mm *= self._emle_base.a_QEq
+            # Charge penetration is only available for the electrostatic and nonpol methods.
+
+            # Ad-hoc hack to get the atomic numbers for the MM atoms.
+            atomic_numbers_mm = _torch.zeros_like(charges_mm, dtype=_torch.int64)
+            atomic_numbers_mm[charges_mm == -0.834] = 8
+            atomic_numbers_mm[charges_mm == 0.417] = 1
+            atomic_numbers_mm = atomic_numbers_mm.unsqueeze(0)
+
+            # Calculate the valence widths and core charges for the MM atoms.
+            species_id_mm = self._emle_base._species_map[atomic_numbers_mm]
+            aev_mm = self._emle_base._emle_aev_computer(species_id_mm, self._xyz_mm)
+            s_mm = self._emle_base._gpr(aev_mm, self._emle_base._ref_mean_s, 
+                                        self._emle_base._c_s, 
+                                        species_id_mm)
+
+            if self._charge_penetration == "slater":
+                # Slater charge penetration
+                q_core_mm = self._emle_base._q_core[species_id_mm]
+                q_val_mm = self._charges_mm - q_core_mm
+                sigma_mm = s_mm
+                sigma_qm = s
+            elif self._charge_penetration == "gaussian":
+                q_core_mm = self._charges_mm
+                q_val_mm = None
+                sigma_mm = s_mm * self._emle_base.a_QEq
+                sigma_qm = s * self._emle_base.a_QEq
         else:
             sigma_mm = None
             sigma_qm = None
+            q_core_mm = self._charges_mm
+            q_val_mm = None
 
         E_static = self._emle_base.get_static_energy(
-            q_core, q_val, self._charges_mm, mesh_data, sigma_qm, sigma_mm
+            q_core, q_val, q_core_mm, q_val_mm, mesh_data, sigma_qm, sigma_mm
         )
    
         # Compute the induced energy.
         if self._method == "electrostatic":
-            sigma_mm = None
-            sigma_qm = None
             E_ind = self._emle_base.get_induced_energy(
-                A_thole, self._charges_mm, s, mesh_data, mask, sigma_qm, sigma_mm
+                A_thole, self._charges_mm, s, mesh_data, mask
             )
         else:
             E_ind = _torch.zeros_like(
