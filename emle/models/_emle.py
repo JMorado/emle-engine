@@ -571,6 +571,9 @@ class EMLE(_torch.nn.Module):
             q_core_mm = self._charges_mm
             q_val_mm = None
 
+        sigma_qm = sigma_qm.detach() if sigma_qm is not None else None
+        sigma_mm = sigma_mm.detach() if sigma_mm is not None else None
+
         E_static = self._emle_base.get_static_energy(
             q_core, q_val, q_core_mm, q_val_mm, mesh_data, sigma_qm, sigma_mm
         )
