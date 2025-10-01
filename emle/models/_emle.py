@@ -562,7 +562,7 @@ class EMLE(_torch.nn.Module):
                 q_core_mm = self._charges_mm
                 q_val_mm = None
                 sigma_mm = s_mm * self._emle_base.a_QEq
-                sigma_qm = s * self._emle_base.a_QEq
+                sigma_qm = s * self._emle_base.a_QEq * ANGSTROM_TO_BOHR
         else:
             sigma_mm = None
             sigma_qm = None
