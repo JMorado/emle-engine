@@ -927,6 +927,9 @@ class EMLEBase(_torch.nn.Module):
         q_val_mm = q_val_mm[mask_smm].unsqueeze(0)
         r = r[:, :, mask_smm[0]]
         rr = mesh_data[1][:, :, mask_smm[0]]
+
+        q_val_mm = _torch.abs(q_val_mm)
+        q_val_qm = _torch.abs(q_val_qm) 
       
         vpot_core_qm = EMLEBase._get_vpot_q(q_core_qm, 1/r)
         vpot_val_qm = EMLEBase._get_vpot_q(q_val_qm, rr)
@@ -936,9 +939,9 @@ class EMLEBase(_torch.nn.Module):
         # ZiZj/r (MM PC - QM PC)
         v_core_core = _torch.sum(vpot_core_qm * q_core_mm, dim=1)
         # qiZj/r * fdamp (MM Slater - QM PC)
-        v_val_core = _torch.sum(vpot_val_qm * q_core_mm, dim=1)
+        v_val_core = -_torch.sum(vpot_val_qm * q_core_mm, dim=1)
         # Ziqj/r * fdamp (MM PC - QM Slater)
-        v_core_val = _torch.sum(vpot_val_mm * q_core_qm, dim=1)
+        v_core_val = -_torch.sum(vpot_val_mm * q_core_qm, dim=1)
         
         def slater_potential(q_val_qm, q_val_mm, r, s_qm, s_mm, tol=1e-3):
             # Broadcasted shapes: [batch, nq, nm]
@@ -991,13 +994,14 @@ class EMLEBase(_torch.nn.Module):
 
             return potential
 
+
         # qi qj / r * foverlap (MM Slater - QM Slater)
         v_val_val = _torch.sum(
             slater_potential(q_val_qm, q_val_mm, r, s_qm, s_mm), dim=(1,2)
         )
 
         sum_ = v_core_core + v_val_core + v_core_val + v_val_val
-        print("ENERGIES", sum_.item()*627.5095)
+
 
         return sum_
 
