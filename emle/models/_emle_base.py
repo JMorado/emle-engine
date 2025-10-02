@@ -928,9 +928,6 @@ class EMLEBase(_torch.nn.Module):
         r = r[:, :, mask_smm[0]]
         rr = mesh_data[1][:, :, mask_smm[0]]
 
-        q_val_mm = _torch.abs(q_val_mm)
-        q_val_qm = _torch.abs(q_val_qm) 
-      
         vpot_core_qm = EMLEBase._get_vpot_q(q_core_qm, 1/r)
         vpot_val_qm = EMLEBase._get_vpot_q(q_val_qm, rr)
         T0_slater_mm = EMLEBase._get_T0_slater(r.permute(0, 2, 1), s_mm[:, :, None])
@@ -939,9 +936,9 @@ class EMLEBase(_torch.nn.Module):
         # ZiZj/r (MM PC - QM PC)
         v_core_core = _torch.sum(vpot_core_qm * q_core_mm, dim=1)
         # qiZj/r * fdamp (MM Slater - QM PC)
-        v_val_core = -_torch.sum(vpot_val_qm * q_core_mm, dim=1)
+        v_val_core = _torch.sum(vpot_val_qm * q_core_mm, dim=1)
         # Ziqj/r * fdamp (MM PC - QM Slater)
-        v_core_val = -_torch.sum(vpot_val_mm * q_core_qm, dim=1)
+        v_core_val = _torch.sum(vpot_val_mm * q_core_qm, dim=1)
         
         def slater_potential(q_val_qm, q_val_mm, r, s_qm, s_mm, tol=1e-3):
             # Broadcasted shapes: [batch, nq, nm]
@@ -960,6 +957,7 @@ class EMLEBase(_torch.nn.Module):
             # Allocate result
             potential = _torch.empty_like(si, dtype=qi.dtype)
             if mask_equal.any():
+                #print("HEREE")
                 sj_eq = sj[mask_equal]
                 si_eq = si[mask_equal]
                 qi_eq = qi[mask_equal]
@@ -972,7 +970,13 @@ class EMLEBase(_torch.nn.Module):
                 term1 = (1 + 11/16*x + 3/16*x**2 + 1/48*x**3) * exp_factor
                 term2 = (delta / (96 * si_eq**2)) * (15 + 15*x + 6*x**2 + x**3) * exp_factor
                 term3 = (delta**2 / (320 * si_eq**3)) * (20 + 20*x + 5*x**2 - 5/3*x**3 - x**4) * exp_factor
-                expr_equal = (1 - term1 - term2 - term3) * qi_eq * qj_eq / rg
+                expr_equal = (term1 - term2 - term3) * qi_eq * qj_eq / rg
+                
+                #save as numpy expr_equal_np = expr_equal.cpu().numpy()
+                #expr_equal_np = expr_equal.detach().cpu().numpy()
+                #import numpy as np
+                #np.savetxt("expr_equal_cp_slater.dat", expr_equal_np)
+                #print("expr_equal", expr_equal.min().item(), expr_equal.max().item())
 
                 potential[mask_equal] = expr_equal
 
@@ -989,10 +993,35 @@ class EMLEBase(_torch.nn.Module):
                 term1 = si_g**4 / (denom1**2) * (1 + (rg/(2*si_g)) - ((2*sj_g**2)/(denom1))) * _torch.exp(-rg/si_g)
                 term2 = sj_g**4 / (denom2**2) * (1 + (rg/(2*sj_g)) - ((2*si_g**2)/(denom2))) * _torch.exp(-rg/sj_g)
 
-                expr_general = qi_g * qj_g * (1 - term1 - term2) / rg
+
+
+                #print("term1", term1, term1.min().item(), term1.max().item())
+                ##print("max_data", id_max, si_g[id_max].item(), sj_g[id_max].item(), rg[id_max].item(), denom1[id_max].item(), rg[id_max].item()/si_g[id_max].item(), term1[id_max].item())
+                #id_max = _torch.argmax(term1)
+                #print("term2", term2, term2.min().item(), term2.max().item())
+                #id_max = _torch.argmax(term2)
+                #print("max_data", id_max, si_g[id_max].item(), sj_g[id_max].item(), rg[id_max].item(), denom2[id_max].item(), rg[id_max].item()/sj_g[id_max].item(), term2[id_max].item())
+                #print((term1 + term2).min().item(), (term1 + term2).max().item())
+                #print("---")
+                expr_general = qi_g * qj_g * (term1 + term2) / rg
+
+                #save as numpy expr_general_np = expr_general.cpu().numpy()
+                #expr_general_np = expr_general.detach().cpu().numpy()
+                #import numpy as np
+                #np.savetxt("expr_general_cp_slater.dat", expr_general_np)
+                #print("expr_general", expr_general.min().item(), expr_general.max().item())
                 potential[~mask_equal] = expr_general
 
             return potential
+
+
+        # Compute net charges
+        q_net_qm = q_core_qm + q_val_qm
+        q_net_mm = q_core_mm + q_val_mm
+
+        # Term 1: Point charge interaction (qi * qj / r)
+        vpot_point = EMLEBase._get_vpot_q(q_net_qm, 1/r)
+        v_point = _torch.sum(vpot_point * q_net_mm, dim=1)
 
 
         # qi qj / r * foverlap (MM Slater - QM Slater)
@@ -1000,10 +1029,15 @@ class EMLEBase(_torch.nn.Module):
             slater_potential(q_val_qm, q_val_mm, r, s_qm, s_mm), dim=(1,2)
         )
 
-        sum_ = v_core_core + v_val_core + v_core_val + v_val_val
-
-
-        return sum_
+        sum_cp = v_val_core + v_core_val + v_val_val
+      
+        HARTREE_TO_KCALMOL = 627.5094740631
+        print("TOTAL", 
+              v_point.item()*HARTREE_TO_KCALMOL, 
+              sum_cp.item()*HARTREE_TO_KCALMOL, 
+              (sum_cp.item() + v_point.item())*HARTREE_TO_KCALMOL)
+     
+        return sum_cp + v_point
 
     @staticmethod
     def get_induced_energy(
@@ -1222,4 +1256,4 @@ class EMLEBase(_torch.nn.Module):
 
         results: torch.Tensor (N_BATCH, MAX_QM_ATOMS, MAX_MM_ATOMS)
         """
-        return (1 - (1 + r / (s * 2)) * _torch.exp(-r / s)) / r
+        return ((1 + r / (s * 2)) * _torch.exp(-r / s)) / r
