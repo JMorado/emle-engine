@@ -541,10 +541,9 @@ class EMLE(_torch.nn.Module):
             # Charge penetration is only available for the electrostatic and nonpol methods.
 
             # Ad-hoc hack to get the atomic numbers for the MM atoms.
-            atomic_numbers_mm = _torch.zeros_like(charges_mm, dtype=_torch.int64)
-            atomic_numbers_mm[charges_mm == -0.834] = 8
-            atomic_numbers_mm[charges_mm == 0.417] = 1
-            atomic_numbers_mm = atomic_numbers_mm.unsqueeze(0)
+            atomic_numbers_mm = _torch.zeros_like(self._charges_mm, dtype=_torch.int64)
+            atomic_numbers_mm[self._charges_mm == -0.834] = 8
+            atomic_numbers_mm[self._charges_mm == 0.417] = 1
 
             # Calculate the valence widths and core charges for the MM atoms.
             species_id_mm = self._emle_base._species_map[atomic_numbers_mm]
