@@ -920,10 +920,17 @@ class EMLEBase(_torch.nn.Module):
         """
         r = 1.0 / mesh_data[0]
 
-        vpot_core_qm = EMLEBase._get_vpot_q(q_core_qm, mesh_data[0])
-        vpot_val_qm = EMLEBase._get_vpot_q(q_val_qm, mesh_data[1])
-        mask_mm = (q_core_mm != 0.0).unsqueeze(-1)
-        T0_slater_mm = _torch.where(mask_mm, EMLEBase._get_T0_slater(r.permute(0, 2, 1), s_mm[:, :, None]), 0.0)
+        # Remove inactive MM atoms
+        mask_smm = (s_mm != 0.0)
+        s_mm = s_mm[mask_smm].unsqueeze(0)
+        q_core_mm = q_core_mm[mask_smm].unsqueeze(0)
+        q_val_mm = q_val_mm[mask_smm].unsqueeze(0)
+        r = r[:, :, mask_smm[0]]
+        rr = mesh_data[1][:, :, mask_smm[0]]
+      
+        vpot_core_qm = EMLEBase._get_vpot_q(q_core_qm, 1/r)
+        vpot_val_qm = EMLEBase._get_vpot_q(q_val_qm, rr)
+        T0_slater_mm = EMLEBase._get_T0_slater(r.permute(0, 2, 1), s_mm[:, :, None])
         vpot_val_mm = EMLEBase._get_vpot_q(q_val_mm, T0_slater_mm)
 
         # ZiZj/r (MM PC - QM PC)
@@ -933,35 +940,66 @@ class EMLEBase(_torch.nn.Module):
         # Ziqj/r * fdamp (MM PC - QM Slater)
         v_core_val = _torch.sum(vpot_val_mm * q_core_qm, dim=1)
         
-        def slater_potential(q_val_qm, q_val_mm, r, s_qm, s_mm, tol=1e-4):
-            qi = q_val_qm[:, :, None]
-            qj = q_val_mm[:, None, :]
-            si = s_qm[:, :, None]
-            sj = s_mm[:, None, :]
+        def slater_potential(q_val_qm, q_val_mm, r, s_qm, s_mm, tol=1e-3):
+            # Broadcasted shapes: [batch, nq, nm]
+            qi = q_val_qm[:, :, None]   # [B, nq, 1]
+            qj = q_val_mm[:, None, :]   # [B, 1, nm]
+            si = s_qm[:, :, None]       # [B, nq, 1]
+            sj = s_mm[:, None, :]       # [B, 1, nm]
 
-            diff2 = si**2 - sj**2
+            # Build full broadcast
+            qi, qj = _torch.broadcast_tensors(qi, qj)
+            si, sj = _torch.broadcast_tensors(si, sj)
 
-            # si==sj formula
-            term_equal = _torch.exp(-r/sj) * (r**3 + 9*r**2*sj + 33*r*sj**2 + 48*sj**3) / sj**3
-            expr_equal = qi * qj * (48 - term_equal) / (48 * r)
+            # Mask for equality
+            mask_equal = _torch.abs(si - sj) < tol
 
-            # si!=sj formula
-            term1 = 2*diff2**3
-            term2 = sj**3 * _torch.exp(-r/sj) * (r*(sj**2 - si**2) - 6*si**2*sj + 2*sj**3)
-            term3 = si**3 * _torch.exp(-r/si) * (sj**2*(r + 6*si) - si**2*(r + 2*si))
-            numerator = qi * qj * (term1 + term2 + term3)
-            denominator = 2 * r * diff2**3
-            expr_general = numerator / denominator
+            # Allocate result
+            potential = _torch.empty_like(si, dtype=qi.dtype)
+            if mask_equal.any():
+                sj_eq = sj[mask_equal]
+                si_eq = si[mask_equal]
+                qi_eq = qi[mask_equal]
+                qj_eq = qj[mask_equal]
+                rg = r[mask_equal]
 
-            potential = _torch.where(_torch.abs(si - sj) < tol, expr_equal, expr_general)
+                x = rg / si_eq
+                delta = sj_eq - si_eq
+                exp_factor = _torch.exp(-x)
+                term1 = (1 + 11/16*x + 3/16*x**2 + 1/48*x**3) * exp_factor
+                term2 = (delta / (96 * si_eq**2)) * (15 + 15*x + 6*x**2 + x**3) * exp_factor
+                term3 = (delta**2 / (320 * si_eq**3)) * (20 + 20*x + 5*x**2 - 5/3*x**3 - x**4) * exp_factor
+                expr_equal = (1 - term1 - term2 - term3) * qi_eq * qj_eq / rg
+
+                potential[mask_equal] = expr_equal
+
+            if (~mask_equal).any():
+                si_g = si[~mask_equal]
+                sj_g = sj[~mask_equal]
+                qi_g = qi[~mask_equal]
+                qj_g = qj[~mask_equal]
+                rg = r[~mask_equal]
+
+                denom1 = (si_g**2 - sj_g**2)
+                denom2 = (sj_g**2 - si_g**2)
+
+                term1 = si_g**4 / (denom1**2) * (1 + (rg/(2*si_g)) - ((2*sj_g**2)/(denom1))) * _torch.exp(-rg/si_g)
+                term2 = sj_g**4 / (denom2**2) * (1 + (rg/(2*sj_g)) - ((2*si_g**2)/(denom2))) * _torch.exp(-rg/sj_g)
+
+                expr_general = qi_g * qj_g * (1 - term1 - term2) / rg
+                potential[~mask_equal] = expr_general
+
             return potential
-        
+
         # qi qj / r * foverlap (MM Slater - QM Slater)
         v_val_val = _torch.sum(
             slater_potential(q_val_qm, q_val_mm, r, s_qm, s_mm), dim=(1,2)
         )
 
-        return (v_core_core + v_val_core + v_core_val + v_val_val)
+        sum_ = v_core_core + v_val_core + v_core_val + v_val_val
+        print("ENERGIES", sum_.item()*627.5095)
+
+        return sum_
 
     @staticmethod
     def get_induced_energy(
@@ -1044,7 +1082,7 @@ class EMLEBase(_torch.nn.Module):
         r = 1.0 / mesh_data[0]
         f1 = _torch.where(mask, EMLEBase._get_f1_slater(r, s[:, :, None] * 2.0), 0.0)
         fields = _torch.sum(
-            mesh_data[2] * f1[..., None] * q[:, None, :, None], dim=2
+            mesh_data[2] * q[:, None, :, None], dim=2
         ).reshape(len(s), -1)
 
         mu_ind = _torch.linalg.solve(A, fields)
