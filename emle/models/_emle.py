@@ -54,7 +54,7 @@ try:
 except:
     _has_nnpops = False
 
-_torch.autograd.set_detect_anomaly(False)
+_torch.autograd.set_detect_anomaly(True)
 
 
 class EMLE(_torch.nn.Module):
@@ -539,41 +539,84 @@ class EMLE(_torch.nn.Module):
 
         if self._charge_penetration and self._method in ["electrostatic", "nonpol"]:
             # Charge penetration is only available for the electrostatic and nonpol methods.
-
-            # Ad-hoc hack to get the atomic numbers for the MM atoms.
-            atomic_numbers_mm = _torch.zeros_like(self._charges_mm, dtype=_torch.int64)
-            atomic_numbers_mm[self._charges_mm == -0.834] = 8
-            atomic_numbers_mm[self._charges_mm == 0.417] = 1
-
-            # Calculate the valence widths and core charges for the MM atoms.
-            species_id_mm = self._emle_base._species_map[atomic_numbers_mm]
-            aev_mm = self._emle_base._emle_aev_computer(species_id_mm, self._xyz_mm)
-            s_mm = self._emle_base._gpr(aev_mm, 
-                                        self._emle_base._ref_mean_s, 
-                                        self._emle_base._c_s, 
-                                        species_id_mm)
-
-            if self._charge_penetration == "slater":
-                # Slater charge penetration
-                q_core_mm = self._emle_base._q_core[species_id_mm]
-                q_val_mm = self._charges_mm - q_core_mm
-                sigma_mm = s_mm
-                sigma_qm = s
-            elif self._charge_penetration == "gaussian":
+            if self._charges_mm.shape[-1] != self._xyz_mm.shape[-2]:
+                # For now, disable charge penetration if there's a size mismatch
+                # TODO: Implement proper handling for mixed MM atom scenarios
+                print(f"Warning: Size mismatch between charges_mm ({self._charges_mm.shape[-1]}) and "
+                      f"xyz_mm ({self._xyz_mm.shape[-2]}). Disabling charge penetration.")
+                sigma_mm = None
+                sigma_qm = None
                 q_core_mm = self._charges_mm
                 q_val_mm = None
-                sigma_mm = s_mm * self._emle_base.a_QEq
-                sigma_qm = s * self._emle_base.a_QEq
+            else:
+                atomic_numbers_env_var = _os.getenv("EMLE_MM_ATOMIC_NUMBERS")
+                if atomic_numbers_env_var:
+                    try:
+                        atomic_numbers_mm = [int(x) for x in atomic_numbers_env_var.split(",")]
+                        if len(atomic_numbers_mm) != self._charges_mm.shape[-1]:
+                            raise ValueError("Length of EMLE_MM_ATOMIC_NUMBERS does not match number of MM atoms.")
+                        atomic_numbers_mm = _torch.tensor(atomic_numbers_mm, dtype=_torch.int64, device=self._device)
+                        atomic_numbers_mm = atomic_numbers_mm.unsqueeze(0).expand(batch_size, -1)
+                    except Exception as e:
+                        print(e)
+                        raise ValueError(f"Invalid format for EMLE_MM_ATOMIC_NUMBERS {atomic_numbers_env_var}. It should be a comma-separated list of integers.") from e
+                else:
+                    # Create atomic numbers for MM atoms based on charges
+                    # Use clone() to avoid in-place operations that break gradients
+                    atomic_numbers_mm = _torch.zeros_like(self._charges_mm, dtype=_torch.int64)
+                    oxygen_mask = (self._charges_mm == -0.834)
+                    hydrogen_mask = (self._charges_mm == 0.417)
+                    atomic_numbers_mm = _torch.where(oxygen_mask, 8, atomic_numbers_mm)
+                    atomic_numbers_mm = _torch.where(hydrogen_mask, 1, atomic_numbers_mm)
+
+
+                # Map to species IDs used in the model.
+                species_id_mm = self._emle_base._species_map[atomic_numbers_mm]
+                
+                aev_mm = self._emle_base._emle_aev_computer(species_id_mm, self._xyz_mm)
+                s_mm = self._emle_base._gpr(aev_mm, 
+                                            self._emle_base._ref_mean_s, 
+                                            self._emle_base._c_s, 
+                                            species_id_mm)
+                """
+                s_mm, q_core_mm, q_val_mm, _ = self._emle_base(
+                    atomic_numbers_mm,
+                    self._xyz_mm,
+                    qm_charge,
+                )
+                """
+                if self._charge_penetration == "slater":
+                    # Slater charge penetration
+                    q_core_mm = self._emle_base._q_core[species_id_mm]
+                    q_val_mm = self._charges_mm - q_core_mm
+                    sigma_mm = s_mm
+                    sigma_qm = s
+                elif self._charge_penetration == "gaussian":
+                    q_core_mm = self._charges_mm
+                    q_val_mm = None
+                    sigma_mm = s_mm * self._emle_base.a_QEq
+                    sigma_qm = s * self._emle_base.a_QEq
+
+            E_ex_rep = self._emle_base._get_exchange_repulsion_energy(
+                q_val, q_val_mm, mesh_data, sigma_qm, sigma_mm
+            )
         else:
             sigma_mm = None
             sigma_qm = None
             q_core_mm = self._charges_mm
             q_val_mm = None
+            E_ex_rep = _torch.zeros(batch_size, dtype=self._xyz_qm.dtype, device=self._xyz_qm.device)
+
+        if self._method == "mm":
+            q_core_mm = self._q_core_mm.expand(batch_size, -1)
+            q_val_mm = _torch.zeros_like(
+                q_core_mm, dtype=self._charges_mm.dtype, device=self._device
+            )
 
         E_static = self._emle_base.get_static_energy(
             q_core, q_val, q_core_mm, q_val_mm, mesh_data, sigma_qm, sigma_mm
         )
-   
+
         # Compute the induced energy.
         if self._method == "electrostatic":
             E_ind = self._emle_base.get_induced_energy(
@@ -582,5 +625,6 @@ class EMLE(_torch.nn.Module):
         else:
             E_ind = _torch.zeros_like(
                 E_static, dtype=self._charges_mm.dtype, device=self._device
-            )
-        return _torch.stack((E_static, E_ind, _torch.zeros_like(E_static)), dim=0)
+            )   
+
+        return _torch.stack((E_static*0, E_ind*0, E_ex_rep, _torch.zeros_like(E_static)), dim=0)

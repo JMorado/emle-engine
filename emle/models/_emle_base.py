@@ -835,15 +835,199 @@ class EMLEBase(_torch.nn.Module):
                     q_core, q_val, q_core_mm, mesh_data, sigma_qm, sigma_mm
                 )
             else:
-                return EMLEBase.get_static_energy_cp_slater(
+                return EMLEBase._get_static_energy_slater(
                     q_core, q_val, q_core_mm, q_val_mm, mesh_data, sigma_qm, sigma_mm
                 )
         else:
             vpot_q_core = EMLEBase._get_vpot_q(q_core, mesh_data[0])
             vpot_q_val = EMLEBase._get_vpot_q(q_val, mesh_data[1])
             vpot_static = vpot_q_core + vpot_q_val
+            
+            # Handle size mismatch between vpot_static and q_core_mm
+            if vpot_static.shape[1] != q_core_mm.shape[1]:
+                min_size = min(vpot_static.shape[1], q_core_mm.shape[1])
+                vpot_static = vpot_static[:, :min_size]
+                q_core_mm = q_core_mm[:, :min_size]
+            
             return _torch.sum(vpot_static * q_core_mm, dim=1)
+
+    @staticmethod
+    def _get_static_energy_slater(q_core_qm, q_val_qm, q_core_mm, q_val_mm, mesh_data, s_qm, s_mm):
+        """
+        Calculate the static electrostatic energy for a charge model consisting of
+        a combination of fixed-point core charges and valence Slater charge distributions.
+
+        Parameters
+        ----------
+        q_core_qm: torch.Tensor (N_BATCH, N_QM_ATOMS,)
+            QM core charges.
+
+        q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS,)
+            QM valence charges.
+
+        q_core_mm: torch.Tensor (N_BATCH, N_MM_ATOMS,)
+            MM core charges.
+
+        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS,)
+            MM valence charges.
+
+        mesh_data: mesh_data object (output of self._get_mesh_data)
+            Mesh data object.
+
+        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Slater widths for QM atoms.
+
+        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Slater widths for MM atoms.
+
+        Returns
+        -------
+        result: torch.Tensor (N_BATCH,)
+            Static electrostatic energy.
+        """
+        r_inv, T0_slater_qm_mm = mesh_data[0], mesh_data[1]
+        r = _torch.where(r_inv > 0, 1.0 / (r_inv + 1e-16), 0.0)
+        T0_slater_mm_qm = EMLEBase._get_T0_slater(r.permute(0, 2, 1), s_mm[:, :, None])
+
+        # Calculate electrostatic energy components
+        E_core_core = _torch.sum(EMLEBase._get_vpot_q(q_core_qm, r_inv) * q_core_mm, dim=1)
+        E_val_core = _torch.sum(EMLEBase._get_vpot_q(q_val_qm, T0_slater_qm_mm) * q_core_mm, dim=1)
+        E_core_val = _torch.sum(EMLEBase._get_vpot_q(q_val_mm, T0_slater_mm_qm) * q_core_qm, dim=1)
+        E_val_val = EMLEBase._get_valence_repulsion(q_val_qm, q_val_mm, r, s_qm, s_mm)
+
+        return E_val_core + E_core_val + E_val_val + E_core_core
+    
+     
+    @staticmethod
+    def _get_valence_repulsion(q_val_qm, q_val_mm, r, s_qm, s_mm):
+        """
+        Calculate the valence-valence repulsion term for Slater charge distributions.
+
+        Parameters
+        ----------
+        q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            QM valence charges.
+
+        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            MM valence charges.
+
+        r: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
+            Distance matrix between QM and MM atoms.
+
+        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Slater widths for QM atoms.
+
+        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Slater widths for MM atoms.
+
+        Returns
+        -------
+        result: torch.Tensor (N_BATCH,)
+            Valence-valence repulsion energy.
+        """
+        def f_diff(si, sj, r):
+            """Interaction between Slater functions with different widths."""
+            s_diff = si**2 - sj**2
+            f = (si**4 / (s_diff**2 + 1e-16)) * (1 + r/(2*si + 1e-16) - 2*sj**2/(s_diff+1e-16)) * _torch.exp(-r/(si+1e-16))
+            return f
+
+        def f_same(si, sj, r):
+            """Interaction between Slater functions with the same widths."""
+            x = r / (si + 1e-16)
+            delta = sj - si
+            exp_x = _torch.exp(-x)
+            term1 = (1 + 11/16.*x + 3/16.*x**2 + 1/48.*x**3) * exp_x
+            term2 = (delta / (96. * si**2 + 1e-16)) * (15. + 15*x + 6.*x**2 + x**3) * exp_x
+            term3 = (delta**2 / (320. * si**3 + 1e-16)) * (20. + 20.*x + 5.*x**2 - 5./3*x**3 - x**4) * exp_x
+            f = (1 - term1) / (r + 1e-16) - term2 - term3
+            return f
+
+        s_qm = s_qm[:, :, None]
+        s_mm = s_mm[:, None, :]
+        cp_corr_diff = (1 - f_diff(s_qm, s_mm, r) - f_diff(s_mm, s_qm, r)) / (r + 1e-16)
+        cp_corr_same = f_same(s_qm, s_mm, r)
+        cp_corr = _torch.where(_torch.abs(s_qm - s_mm) < 1e-3, cp_corr_same, cp_corr_diff)
+        return _torch.sum(q_val_qm[:, :, None] * q_val_mm[:, None, :] * cp_corr, dim=(1,2))
+
+
+    @staticmethod
+    def _get_exchange_repulsion_energy(q_val_qm: Tensor, q_val_mm: Tensor, mesh_data: Tensor, s_qm: Tensor, s_mm: Tensor) -> Tensor:
+        """
+        Calculate the exchange-repulsion energy between QM and MM valence Slater charge distributions.
+
+        Parameters
+        ----------
+        q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            QM valence charges.
+
+        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            MM valence charges.
+
+        mesh_data: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
+            Mesh data object (output of self._get_mesh_data)
+
+        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Slater widths for QM atoms.
+
+        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Slater widths for MM atoms.
+
+        Returns
+        -------
+        result: torch.Tensor (N_BATCH,)
+            Exchange-repulsion energy.
+        """
+        alpha = 8.13
+        r = _torch.where(mesh_data[0] > 0, 1.0 / (mesh_data[0] + 1e-16), 0.0)
+        S = EMLEBase._get_slater_overlap(s_qm, s_mm, r)
+        return _torch.sum(q_val_qm[:, :, None] * q_val_mm[:, None, :] * S, dim=(1,2)) * alpha
+
+
+    @staticmethod
+    def _get_slater_overlap(s_qm: Tensor, s_mm: Tensor, r: Tensor) -> Tensor:
+        """
+        Overlap integral between two Slater functions.
+
+        Parameters
+        ----------
+        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS, 1)
+            Slater widths for QM atoms.
+
+        s_mm: torch.Tensor (N_BATCH, 1, N_MM_ATOMS)
+            Slater widths for MM atoms.
+
+        r: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
+            Distance matrix between QM and MM atoms.
+
+        Returns
+        -------
+        result: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
+            Overlap integrals.
+        """ 
+        def h_diff(si, sj, r):
+            """Overlap between Slater functions with different widths."""
+            s_diff = sj**2 - si**2
+            term1 = 4 * si**2 * sj**2 / (s_diff**3 + 1e-16)
+            term2 = (si * r) / (s_diff**2 + 1e-16)
+            return (term1 + term2) * _torch.exp(-r / (si + 1e-16))
+        
+        def h_same(si, sj, r):
+            """Overlap between Slater functions with the same widths."""
+            s_diff = sj - si
+            x = r / (si + 1e-16)
+            exp_x = _torch.exp(-x)
+            term1 = 1/(192*_torch.pi*si**3 + 1e-16) * (3 + 3*x + x**2) * exp_x
+            term2 = s_diff / (384*si**4 + 1e-16) * (-9 - 9*x - 2*x**2 + x**3) * exp_x
+            term3 = s_diff**2 / (3840*si**5 + 1e-16) * (90 + 90*x + 5*x**2 - 25*x**3 + 3*x**4) * exp_x
+            return term1 + term2 + term3
+        
+        s_qm = s_qm[:, :, None]
+        s_mm = s_mm[:, None, :]
+        S_diff = (h_diff(s_qm, s_mm, r) + h_diff(s_mm, s_qm, r)) / (8 * _torch.pi * r + 1e-16)
+        S_equal = h_same(s_qm, s_mm, r) 
+        return _torch.where(_torch.abs(s_qm - s_mm) < 1e-3, S_equal, S_diff)
  
+
     @staticmethod
     def _get_T0_cp(r: Tensor, sigma_qm: Tensor, sigma_mm: Tensor) -> Tensor:
         """
@@ -868,6 +1052,7 @@ class EMLEBase(_torch.nn.Module):
             sigma_sum > 0, _torch.erf(r / ((sigma_sum + 1e-16) * sqrt2)) / (r + 1e-16), 0.0
         )
         
+
     @staticmethod
     def get_static_energy_cp_gaussian(q_core, q_val, charges_mm, mesh_data, sigma_qm, sigma_mm):
         """
@@ -895,156 +1080,7 @@ class EMLEBase(_torch.nn.Module):
         vpot_static = _torch.sum(T0_cp * q_qm[:, :, None], dim=1)
         return _torch.sum(vpot_static * charges_mm, dim=1)
 
-    @staticmethod
-    def get_static_energy_cp_slater(q_core_qm, q_val_qm, q_core_mm, q_val_mm, mesh_data, s_qm, s_mm):
-        """
-        Calculate the static electrostatic energy with charge penetration.
-
-        Parameters
-        ----------
-
-        q_core_qm: torch.Tensor (N_BATCH, N_QM_ATOMS,)
-            QM core charges.
-        q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS,)
-            QM valence charges.
-        q_core_mm: torch.Tensor (N_BATCH, N_MM_ATOMS,)
-            MM core charges.
-        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS,)
-            MM valence charges.
-        mesh_data: mesh_data object (output of self._get_mesh_data)
-            Mesh data object.
-        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            Slater widths for QM atoms.
-        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            Slater widths for MM atoms.
-        """
-        r = 1.0 / mesh_data[0]
-
-        # Remove inactive MM atoms
-        mask_smm = (s_mm != 0.0)
-        s_mm = s_mm[mask_smm].unsqueeze(0)
-        q_core_mm = q_core_mm[mask_smm].unsqueeze(0)
-        q_val_mm = q_val_mm[mask_smm].unsqueeze(0)
-        r = r[:, :, mask_smm[0]]
-        rr = mesh_data[1][:, :, mask_smm[0]]
-
-        q_val_mm = _torch.abs(q_val_mm)
-        q_val_qm = _torch.abs(q_val_qm)
-
-
-        vpot_core_qm = EMLEBase._get_vpot_q(q_core_qm, 1/r)
-        vpot_val_qm = EMLEBase._get_vpot_q(q_val_qm, rr)
-        T0_slater_mm = EMLEBase._get_T0_slater(r.permute(0, 2, 1), s_mm[:, :, None])
-        vpot_val_mm = EMLEBase._get_vpot_q(q_val_mm, T0_slater_mm)
-
-        # ZiZj/r (MM PC - QM PC)
-        v_core_core = _torch.sum(vpot_core_qm * q_core_mm, dim=1)
-        # qiZj/r * fdamp (MM Slater - QM PC)
-        v_val_core = _torch.sum(vpot_val_qm * q_core_mm, dim=1)
-        # Ziqj/r * fdamp (MM PC - QM Slater)
-        v_core_val = _torch.sum(vpot_val_mm * q_core_qm, dim=1)
-        
-        def slater_potential(q_val_qm, q_val_mm, r, s_qm, s_mm, tol=1e-3):
-            # Broadcasted shapes: [batch, nq, nm]
-            qi = q_val_qm[:, :, None]   # [B, nq, 1]
-            qj = q_val_mm[:, None, :]   # [B, 1, nm]
-            si = s_qm[:, :, None]       # [B, nq, 1]
-            sj = s_mm[:, None, :]       # [B, 1, nm]
-
-            print("SLATER POTENTIAL SHAPES", qi.shape, qj.shape, si.shape, sj.shape, r.shape)
-
-            # Build full broadcast
-            qi, qj = _torch.broadcast_tensors(qi, qj)
-            si, sj = _torch.broadcast_tensors(si, sj)
-
-            # Mask for equality
-            mask_equal = _torch.abs(si - sj) < tol
-
-            # Allocate result
-            potential = _torch.empty_like(si, dtype=qi.dtype)
-            if mask_equal.any():
-                #print("HEREE")
-                sj_eq = sj[mask_equal]
-                si_eq = si[mask_equal]
-                qi_eq = qi[mask_equal]
-                qj_eq = qj[mask_equal]
-                rg = r[mask_equal]
-
-                x = rg / si_eq
-                delta = sj_eq - si_eq
-                exp_factor = _torch.exp(-x)
-                term1 = (1 + 11/16*x + 3/16*x**2 + 1/48*x**3) * exp_factor
-                term2 = (delta / (96 * si_eq**2)) * (15 + 15*x + 6*x**2 + x**3) * exp_factor
-                term3 = (delta**2 / (320 * si_eq**3)) * (20 + 20*x + 5*x**2 - 5/3*x**3 - x**4) * exp_factor
-                expr_equal = (term1 + term2 + term3) * qi_eq * qj_eq / rg
-                
-                #save as numpy expr_equal_np = expr_equal.cpu().numpy()
-                #expr_equal_np = expr_equal.detach().cpu().numpy()
-                #import numpy as np
-                #np.savetxt("expr_equal_cp_slater.dat", expr_equal_np)
-                #print("expr_equal", expr_equal.min().item(), expr_equal.max().item())
-
-                potential[mask_equal] = expr_equal
-
-            if (~mask_equal).any():
-                si_g = si[~mask_equal]
-                sj_g = sj[~mask_equal]
-                qi_g = qi[~mask_equal]
-                qj_g = qj[~mask_equal]
-                rg = r[~mask_equal]
-
-                denom1 = (si_g**2 - sj_g**2)
-                denom2 = (sj_g**2 - si_g**2)
-
-                term1 = si_g**4 / (denom1**2) * (1 + (rg/(2*si_g)) - ((2*sj_g**2)/(denom1))) * _torch.exp(-rg/si_g)
-                term2 = sj_g**4 / (denom2**2) * (1 + (rg/(2*sj_g)) - ((2*si_g**2)/(denom2))) * _torch.exp(-rg/sj_g)
-
-                #print("term1", term1, term1.min().item(), term1.max().item())
-                ##print("max_data", id_max, si_g[id_max].item(), sj_g[id_max].item(), rg[id_max].item(), denom1[id_max].item(), rg[id_max].item()/si_g[id_max].item(), term1[id_max].item())
-                #id_max = _torch.argmax(term1)
-                #print("term2", term2, term2.min().item(), term2.max().item())
-                #id_max = _torch.argmax(term2)
-                #print("max_data", id_max, si_g[id_max].item(), sj_g[id_max].item(), rg[id_max].item(), denom2[id_max].item(), rg[id_max].item()/sj_g[id_max].item(), term2[id_max].item())
-                #print((term1 + term2).min().item(), (term1 + term2).max().item())
-                #print("---")
-                expr_general = qi_g * qj_g * (term1 + term2) / rg
-
-                #save as numpy expr_general_np = expr_general.cpu().numpy()
-                #expr_general_np = expr_general.detach().cpu().numpy()
-                #import numpy as np
-                #np.savetxt("expr_general_cp_slater.dat", expr_general_np)
-                #print("expr_general", expr_general.min().item(), expr_general.max().item())
-                potential[~mask_equal] = expr_general
-
-            return potential
-
-        # Compute net charges
-        q_net_qm = q_core_qm - q_val_qm
-        q_net_mm = q_core_mm - q_val_mm
-
-        # Term 1: Point charge interaction (qi * qj / r)
-        vpot_point = EMLEBase._get_vpot_q(q_net_qm, 1/r)
-        v_point = _torch.sum(vpot_point * q_net_mm, dim=1) 
-
-        # qi qj / r * foverlap (MM Slater - QM Slater)
-        v_val_val = _torch.sum(
-            slater_potential(q_val_qm, q_val_mm, r, s_qm, s_mm), dim=(1,2)
-        )
-
-        sum_cp = v_val_core + v_core_val - v_val_val
-        """
-        HARTREE_TO_KCALMOL = 627.5094740631
-        print("RMIN", r.min().item(), "corresponding to pair", r.argmin().item())
-        print("V_VAL_CORE", v_val_core.item()*HARTREE_TO_KCALMOL)
-        print("V_CORE_VAL", v_core_val.item()*HARTREE_TO_KCALMOL)
-        print("V_VAL_VAL", v_val_val.item()*HARTREE_TO_KCALMOL)
-        print("TOTAL", 
-              v_point.item()*HARTREE_TO_KCALMOL, 
-              sum_cp.item()*HARTREE_TO_KCALMOL, 
-              (sum_cp.item() + v_point.item())*HARTREE_TO_KCALMOL)
-        """
-        return sum_cp + v_point
-
+    
     @staticmethod
     def get_induced_energy(
         A_thole: Tensor,
@@ -1084,6 +1120,7 @@ class EMLEBase(_torch.nn.Module):
         vpot_ind = EMLEBase._get_vpot_mu(mu_ind, mesh_data[2])
         return _torch.sum(vpot_ind * charges_mm, dim=1) * 0.5
 
+
     @staticmethod
     def _get_mu_ind(
         A: Tensor,
@@ -1122,7 +1159,6 @@ class EMLEBase(_torch.nn.Module):
         result: torch.Tensor (N_BATCH, MAX_QM_ATOMS, 3)
             Array of induced dipoles
         """
-
         r = 1.0 / mesh_data[0]
         f1 = _torch.where(mask, EMLEBase._get_f1_slater(r, s[:, :, None] * 2.0), 0.0)
         fields = _torch.sum(
@@ -1262,4 +1298,4 @@ class EMLEBase(_torch.nn.Module):
 
         results: torch.Tensor (N_BATCH, MAX_QM_ATOMS, MAX_MM_ATOMS)
         """
-        return ((1 + r / (s * 2)) * _torch.exp(-r / s)) / r
+        return (1 - (1 + r / (s * 2 + 1e-16)) * _torch.exp(-r / (s + 1e-16))) / (r + 1e-16)
