@@ -20,19 +20,27 @@
 # along with EMLE-Engine. If not, see <http://www.gnu.org/licenses/>.
 #####################################################################
 
-from loguru import logger as _logger
 import os as _os
 import sys as _sys
-import torch as _torch
 
+import numpy as _np
+import torch as _torch
+from loguru import logger as _logger
+from torch.utils.data import DataLoader as _DataLoader
+from torch.utils.data import TensorDataset as _TensorDataset
+
+from ..models import EMLE as _EMLE
 from ..models import EMLEAEVComputer as _EMLEAEVComputer
 from ..models import EMLEBase as _EMLEBase
 from ._gpr import GPR as _GPR
 from ._ivm import IVM as _IVM
+from ._loss import AtomicPropertyLoss as _AtomicPropertyLoss
+from ._loss import ExchangeRepulsionLoss as _ExchangeRepulsionLoss
 from ._loss import QEqLoss as _QEqLoss
+from ._loss import ShortRangeCorrectionLoss as _ShortRangeCorrectionLoss
 from ._loss import TholeLoss as _TholeLoss
-from ._utils import pad_to_max as _pad_to_max
 from ._utils import mean_by_z as _mean_by_z
+from ._utils import pad_to_max as _pad_to_max
 
 
 class EMLETrainer:
@@ -67,7 +75,7 @@ class EMLETrainer:
             log_level = log_level.upper().replace(" ", "")
 
             # Validate the log level.
-            if not log_level in _logger._core.levels.keys():
+            if log_level not in _logger._core.levels.keys():
                 raise ValueError(
                     f"Unsupported logging level '{log_level}'. Options are: {', '.join(_logger._core.levels.keys())}"
                 )
@@ -318,7 +326,7 @@ class EMLETrainer:
         z: numpy.array, List[numpy.array], torch.Tensor, List[torch.Tensor] (N_BATCH, N_ATOMS)
             Atomic numbers.
 
-        xyz: numpy.array, List[numpy.array], torch.Tensor, List[torch.Tensor] (N_BATCH, N_ATOM, 3
+        xyz: numpy.array, List[numpy.array], torch.Tensor, List[torch.Tensor] (N_BATCH, N_ATOM, 3)
             Atomic coordinates.
 
         s: numpy.array, List[numpy.array], torch.Tensor, List[torch.Tensor] (N_BATCH, N_ATOMS)
@@ -635,3 +643,530 @@ class EMLETrainer:
         self._write_model_to_file(plot_data, plot_data_filename)
 
         return emle_base
+
+    def train_nagl(
+        self,
+        z_qm,
+        z_mm,
+        xyz_qm,
+        xyz_mm,
+        q_mol_qm,
+        q_mm,
+        e_exrep,
+        e_sr_corr,
+        train_mask,
+        alpha_mode="reference",
+        epochs=100,
+        lr_s=1e-4,
+        lr_exrep=1e-3,
+        print_every=10,
+        batch_size=1024,
+        model_filename="emle_model.mat",
+        device=_torch.device("cuda"),
+        dtype=_torch.float64,
+        shuffle=True,
+        train_mode="sequential",
+        loss_weight_exrep=1.0,
+        loss_weight_sr_corr=1.0,
+    ):
+        """
+        Train an EMLENAGL model.
+
+        Parameters
+        ----------
+        
+        train_mode: str, optional, default="sequential"
+            Training mode for exrep and short-range correction parameters.
+            Options are:
+            - "sequential": Train A_exrep first, then A_sr_corr (default behavior)
+            - "simultaneous": Train both A_exrep and A_sr_corr together with combined loss
+        
+        loss_weight_exrep: float, optional, default=1.0
+            Weight for the exchange repulsion loss when train_mode="simultaneous".
+            Only used in simultaneous training mode.
+        
+        loss_weight_sr_corr: float, optional, default=1.0
+            Weight for the short-range correction loss when train_mode="simultaneous".
+            Only used in simultaneous training mode.
+
+        Returns
+        -------
+        """
+        from ..models import NAGLEMLE
+
+        # Validate train_mode parameter
+        train_mode = train_mode.lower().replace(" ", "")
+        if train_mode not in ("sequential", "simultaneous"):
+            raise ValueError(
+                f"train_mode must be 'sequential' or 'simultaneous', got '{train_mode}'"
+            )
+        
+        # Validate loss weights
+        if not isinstance(loss_weight_exrep, (int, float)) or loss_weight_exrep <= 0:
+            raise ValueError("loss_weight_exrep must be a positive number")
+        if not isinstance(loss_weight_sr_corr, (int, float)) or loss_weight_sr_corr <= 0:
+            raise ValueError("loss_weight_sr_corr must be a positive number")
+        
+        _logger.info(f"Training mode: {train_mode}")
+        if train_mode == "simultaneous":
+            _logger.info(f"Loss weights - exrep: {loss_weight_exrep}, sr_corr: {loss_weight_sr_corr}")
+
+        assert (
+            len(z_qm) == len(z_mm) == len(xyz_qm) == len(xyz_mm) == len(e_exrep)
+        ), "z, xyz, and e_exrep must have the same number of samples"
+
+        if train_mask is None:
+            train_mask = _torch.ones(len(z_qm), dtype=_torch.bool)
+
+        # Prepare batch data.
+        z_qm = _pad_to_max(z_qm)
+        xyz_qm = _pad_to_max(xyz_qm)
+        z_mm = _pad_to_max(z_mm)
+        xyz_mm = _pad_to_max(xyz_mm)
+        e_exrep = _pad_to_max(e_exrep)
+        e_sr_corr = _pad_to_max(e_sr_corr)
+        q_mol_qm = _pad_to_max(q_mol_qm)
+        q_mm = _pad_to_max(q_mm)
+
+        z_qm_train = z_qm[train_mask]
+        xyz_qm_train = xyz_qm[train_mask]
+        z_mm_train = z_mm[train_mask]
+        xyz_mm_train = xyz_mm[train_mask]
+        e_exrep_train = e_exrep[train_mask]
+        e_sr_corr_train = e_sr_corr[train_mask]
+        q_mol_qm_train = q_mol_qm[train_mask]
+        q_mm_train = q_mm[train_mask]
+        species = _torch.unique(_torch.tensor(z_qm_train[z_qm_train > 0], device=device))
+
+        # Place on the correct device and set the data type.
+        z_qm_train = z_qm_train.to(device=device, dtype=_torch.int64)
+        xyz_qm_train = xyz_qm_train.to(device=device, dtype=dtype)
+        z_mm_train = z_mm_train.to(device=device, dtype=_torch.int64)
+        xyz_mm_train = xyz_mm_train.to(device=device, dtype=dtype)
+        e_exrep_train = e_exrep_train.to(device=device, dtype=dtype)
+        e_sr_corr_train = e_sr_corr_train.to(device=device, dtype=dtype)
+        species = species.to(device=device, dtype=_torch.int64)
+        q_mol_qm_train = q_mol_qm_train.to(device=device, dtype=dtype)
+        q_mm_train = q_mm_train.to(device=device, dtype=dtype)
+        q_mol_mm_train = _torch.sum(q_mm_train, dim=1)
+
+        # Shuffle
+        if shuffle:
+            indices = _torch.randperm(z_qm_train.shape[0])
+            z_qm_train = z_qm_train[indices]
+            xyz_qm_train = xyz_qm_train[indices]
+            z_mm_train = z_mm_train[indices]
+            xyz_mm_train = xyz_mm_train[indices]
+            e_exrep_train = e_exrep_train[indices]
+            e_sr_corr_train = e_sr_corr_train[indices]
+            q_mol_qm_train = q_mol_qm_train[indices]
+            q_mm_train = q_mm_train[indices]
+            q_mol_mm_train = q_mol_mm_train[indices]
+
+        # Create the EMLE model
+        emle = _EMLE(
+            model="/home/joaomorado/EMLE_WATER_MODEL/SIMULATIONS_NEW/SAPT/aceticacid/test_NAGL_CO/ligand_patched_species.mat",
+            alpha_mode=alpha_mode,
+            device=device,
+            dtype=dtype,
+        )
+        emle_base = emle._emle_base
+
+        # Create dataloader
+        dataset = _TensorDataset(z_qm_train, xyz_qm_train, q_mol_qm_train)
+        dataloader = _DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+        _logger.info("Pre-computing valence charges and widths for the QM references...")
+        # Valence widths, core charges, valence charges, A_thole tensor, A_exrep parameters, A_short_range_corr parameters
+        # Pre-compute valence charges and widths for the QM references
+        q_val_qm_train = []
+        s_qm_train = []
+        q_core_qm_train = []
+        A_thole_qm_train = []
+        with _torch.no_grad():
+            for batch in dataloader:
+                s_qm, q_core_qm, q_val_qm, A_thole, *_ = emle_base.forward(*batch)
+                q_val_qm_train.append(q_val_qm)
+                s_qm_train.append(s_qm)
+                q_core_qm_train.append(q_core_qm)
+                A_thole_qm_train.append(A_thole)
+        s_qm_train = _torch.cat(s_qm_train)
+        q_val_qm_train = _torch.cat(q_val_qm_train)
+        q_core_qm_train = _torch.cat(q_core_qm_train)
+        A_thole_qm_train = _torch.cat(A_thole_qm_train)
+
+        # Pre-compute valence charges and widths for the MM references
+        dataset = _TensorDataset(z_mm_train, xyz_mm_train, q_mol_mm_train)
+        dataloader = _DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        s_mm_train = []
+        q_core_mm_train = []
+        with _torch.no_grad():
+            for batch in dataloader:
+                s_mm, q_core_mm, _, *_ = emle_base.forward(*batch)
+                s_mm_train.append(s_mm)
+                q_core_mm_train.append(q_core_mm)
+        s_mm_train = _torch.cat(s_mm_train)
+        q_core_mm_train = _torch.cat(q_core_mm_train)
+
+        species_id_mm = emle_base._species_map[z_mm_train]
+        q_val_mm_train = q_mm_train - emle_base._q_core[species_id_mm]
+        q_val_mm_train = q_val_mm_train * (s_mm_train > 0)
+
+        # Get mesh data
+        mask = (z_qm_train > 0).unsqueeze(-1)
+        ANGSTROM_TO_BOHR = 1.8897261258369282
+        mesh_data = emle_base._get_mesh_data(xyz_qm_train * ANGSTROM_TO_BOHR, xyz_mm_train * ANGSTROM_TO_BOHR, s_qm_train, mask)
+
+        # Create the NAGL model
+        nagl = NAGLEMLE(
+            species=[int(z) for z in species],
+            properties=["A_exrep", "A_sr_corr", "s"],
+            n_conv_layers=3,
+            hidden_dim=128,
+            n_ffnn_layers=4,
+            # model_filepath="/home/joaomorado/repos/emle-bespoke/examples/DES_dimers/ws/emle_nagl.pt"
+        ).to(device)
+
+        # Create OpenFF molecules and dataloaders
+        _logger.info("Creating OpenFF molecules and dataloaders for QM region...")
+        off_qm = nagl.create_openff_mol(z_qm_train, xyz_qm_train, charge=q_mol_qm_train)
+        dataloader_qm = nagl.create_dataloader(off_qm, device=device, batch_size=batch_size)
+        _logger.info("Creating OpenFF molecules and dataloaders for MM region...")
+        off_mm = nagl.create_openff_mol(z_mm_train, xyz_mm_train, charge=q_mol_mm_train)
+        dataloader_mm = nagl.create_dataloader(off_mm, device=device, batch_size=batch_size)
+
+        # Create dataloaders for QM and MM data
+        _logger.info("Creating dataloaders for training tensors...")
+        dataset_tensors = _TensorDataset(q_core_qm_train, q_val_qm_train,
+                                         q_core_mm_train, q_val_mm_train,
+                                         s_qm_train, s_mm_train,
+                                         e_exrep_train, e_sr_corr_train,
+                                         A_thole_qm_train, *mesh_data)
+        dataloader_tensors = _DataLoader(dataset_tensors, batch_size=batch_size, shuffle=False)
+
+        # Fit s to the widths predicted by EMLE
+        _logger.info("Fitting s...")
+        loss_instance = _AtomicPropertyLoss(emle_base, nagl, property_label="s", loss=_torch.nn.MSELoss())
+        loss_instance.eval()
+        opt_parameters = [
+            param
+            for name, param in nagl.named_parameters()
+        ]   
+        optimizer = _torch.optim.Adam(opt_parameters, lr=lr_s)
+        for epoch in range(epochs):
+            loss_instance.train()
+            total_loss = total_rmse = total_max_error = 0.0
+            values, target = [], []
+            for (graphs_qm_batch, _), (graphs_mm_batch, _), tensor_batch in zip(dataloader_qm, dataloader_mm, dataloader_tensors):
+                optimizer.zero_grad()
+                _, q_val_qm_train, _, q_val_mm_train, s_qm_train, s_mm_train, e_exrep_train, _, _, *mesh_data = tensor_batch
+                loss, rmse, max_error, v, t = loss_instance(graphs_qm_batch, 
+                                                            graphs_mm_batch, 
+                                                            s_qm_train, 
+                                                            s_mm_train)
+                values.append(v.detach().cpu())
+                target.append(t.detach().cpu())
+                loss = loss / len(q_val_qm_train) 
+                loss.backward(retain_graph=False)
+                optimizer.step()
+                total_loss += loss.item()
+                total_rmse += rmse.item()
+                total_max_error = max(total_max_error, max_error.item())
+
+            values = _torch.cat(values)
+            target = _torch.cat(target)
+            _np.savetxt("nagl_s_predicted.txt", values.numpy())
+            _np.savetxt("nagl_s_target.txt", target.numpy())
+
+            rmse = _torch.sqrt(_torch.mean((values - target) ** 2)).item()
+            max_error = _torch.max(_torch.abs(values - target)).item()
+
+            if (epoch + 1) % print_every == 0:
+                _logger.info(
+                    f"Epoch {epoch+1}: Loss ={total_loss:9.4f}    "
+                    f"RMSE ={rmse:9.4f}    "
+                    f"Max Error ={max_error:9.4f}"
+                )
+
+        # Choose training mode: sequential or simultaneous
+        if train_mode == "sequential":
+            # ========== SEQUENTIAL TRAINING MODE ==========
+            # Fit A_exrep first, then A_sr_corr
+            
+            # Fit A_exrep
+            _logger.info("Fitting exchange-repulsion parameters...")
+            loss_instance = _ExchangeRepulsionLoss(emle_base, nagl, loss=_torch.nn.MSELoss())
+            loss_instance.eval()
+            opt_parameters = [
+                param
+                for name, param in nagl.named_parameters() if "A_exrep" in name
+            ]
+            _logger.info(f"Optimizing parameters: {[name for name, _ in nagl.named_parameters() if 'A_exrep' in name]}")
+            optimizer = _torch.optim.Adam(opt_parameters, lr=lr_exrep)
+            for epoch in range(epochs):
+                loss_instance.train()
+                total_loss = total_rmse = total_max_error = 0.0
+                values, target = [], []
+                for (graphs_qm_batch, _), (graphs_mm_batch, _), tensor_batch in zip(dataloader_qm, dataloader_mm, dataloader_tensors):
+                    optimizer.zero_grad()
+                    _, q_val_qm_train, _, q_val_mm_train, s_qm_train, s_mm_train, e_exrep_train, _, _, *mesh_data = tensor_batch
+                    loss, rmse, max_error, v, t = loss_instance(graphs_qm_batch, 
+                                                                graphs_mm_batch, 
+                                                                q_val_qm_train, 
+                                                                q_val_mm_train, 
+                                                                mesh_data, 
+                                                                s_qm_train, 
+                                                                s_mm_train, 
+                                                                e_exrep_train)
+                    values.append(v.detach().cpu())
+                    target.append(t.detach().cpu())
+                    loss = loss / len(q_val_qm_train) 
+                    loss.backward(retain_graph=False)
+                    optimizer.step()
+                    total_loss += loss.item()
+                    total_rmse += rmse.item()
+                    total_max_error = max(total_max_error, max_error.item())
+
+                values = _torch.cat(values)
+                target = _torch.cat(target)
+                _np.savetxt("nagl_exrep_predicted.txt", values.numpy())
+                _np.savetxt("nagl_exrep_target.txt", target.numpy())
+
+                rmse = _torch.sqrt(_torch.mean((values - target) ** 2)).item()
+                max_error = _torch.max(_torch.abs(values - target)).item()
+
+                if (epoch + 1) % print_every == 0:
+                    _logger.info(
+                        f"Epoch {epoch+1}: Loss ={total_loss:9.4f}    "
+                        f"RMSE ={rmse:9.4f}    "
+                        f"Max Error ={max_error:9.4f}"
+                    )
+            # Pre-compute E_static_emle, E_ind_emle, and E_exrep_emle
+            E_static_emle = []
+            E_ind_emle = []
+            E_exrep_emle = []
+            nagl.eval()
+            for (graphs_qm_batch, _), (graphs_mm_batch, _), tensor_batch in zip(dataloader_qm, dataloader_mm, dataloader_tensors):
+                with _torch.no_grad():
+                    q_core_qm_train, q_val_qm_train, q_core_mm_train, q_val_mm_train, s_qm_train, s_mm_train, e_exrep_train, e_exrep_train, A_thole_qm_train, *mesh_data = tensor_batch
+
+                    # Static energy
+                    E_static = emle_base._get_static_energy_slater(q_core_qm_train, q_val_qm_train, q_core_mm_train, q_val_mm_train, mesh_data, s_qm_train, s_mm_train)
+                    
+                    # Induction energy
+                    charges_mm = q_core_mm_train + q_val_mm_train
+                    mask = s_qm_train > 0
+                    E_ind = emle_base.get_induced_energy(A_thole_qm_train, charges_mm, s_qm_train, mesh_data, mask)
+
+                    # Exchange-repulsion
+                    A_exrep_qm = nagl(graphs_qm_batch)["A_exrep"]
+                    A_exrep_mm = nagl(graphs_mm_batch)["A_exrep"]
+                    A_exrep_qm = _torch.nn.functional.pad(A_exrep_qm, (0, q_val_qm_train.size(1) - A_exrep_qm.size(1)))
+                    A_exrep_mm = _torch.nn.functional.pad(A_exrep_mm, (0, q_val_mm_train.size(1) - A_exrep_mm.size(1)))
+                    E_exrep = emle_base._get_exchange_repulsion_energy(A_exrep_qm, A_exrep_mm, q_val_qm_train, q_val_mm_train, mesh_data, s_qm_train, s_mm_train)
+
+                    # Append 
+                    E_static_emle.append(E_static)
+                    E_ind_emle.append(E_ind)
+                    E_exrep_emle.append(E_exrep)
+
+            E_static_emle = _torch.cat(E_static_emle)
+            E_ind_emle = _torch.cat(E_ind_emle)
+            E_exrep_emle = _torch.cat(E_exrep_emle)
+
+            dataset = _torch.utils.data.TensorDataset(E_static_emle, E_ind_emle, E_exrep_emle)
+            dataloader_energy = _torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+            # Fit A_sr_corr
+            _logger.info("Fitting short-range correction parameters...")
+            loss_instance = _ShortRangeCorrectionLoss(emle_base, nagl, loss=_torch.nn.MSELoss())
+            loss_instance.eval()
+            opt_parameters = [
+                param
+                for name, param in nagl.named_parameters() if "A_sr_corr" in name
+            ]
+            _logger.info(f"Optimizing parameters: {[name for name, _ in nagl.named_parameters() if 'A_sr_corr' in name]}")
+            optimizer = _torch.optim.Adam(opt_parameters, lr=lr_exrep)
+            for epoch in range(epochs):
+                loss_instance.train()
+                total_loss = total_rmse = total_max_error = 0.0
+                values, target = [], []
+                for (graphs_qm_batch, _), (graphs_mm_batch, _), tensor_batch, energies_batch in zip(dataloader_qm, dataloader_mm, dataloader_tensors, dataloader_energy):
+                    optimizer.zero_grad()
+                    _, q_val_qm_train, _, q_val_mm_train, s_qm_train, s_mm_train, _, e_sr_corr_train, _, *mesh_data = tensor_batch
+                    e_static_train, e_ind_train, e_exrep_train = energies_batch
+                    e_target_train = e_sr_corr_train
+                    offset = (e_static_train + e_ind_train + e_exrep_train) * 2625.5002
+                    e_target_train = e_target_train 
+                    loss, rmse, max_error, v, t = loss_instance(graphs_qm_batch,
+                                                                graphs_mm_batch,
+                                                                q_val_qm_train,
+                                                                q_val_mm_train,
+                                                                mesh_data,
+                                                                s_qm_train,
+                                                                s_mm_train,
+                                                                e_target_train,
+                                                                offset)
+                    values.append(v.detach().cpu())
+                    target.append(t.detach().cpu())
+                    loss = loss / len(q_val_qm_train) 
+                    loss.backward(retain_graph=False)
+                    optimizer.step()
+                    total_loss += loss.item()
+                    total_rmse += rmse.item()
+                    total_max_error = max(total_max_error, max_error.item())
+
+                values = _torch.cat(values)
+                target = _torch.cat(target)
+                _np.savetxt("nagl_sr_corr_predicted.txt", values.numpy())
+                _np.savetxt("nagl_sr_corr_target.txt", target.numpy())
+
+                rmse = _torch.sqrt(_torch.mean((values - target) ** 2)).item()
+                max_error = _torch.max(_torch.abs(values - target)).item()
+
+                if (epoch + 1) % print_every == 0:
+                    _logger.info(
+                        f"Epoch {epoch+1}: Loss ={total_loss:9.4f}    "
+                        f"RMSE ={rmse:9.4f}    "
+                        f"Max Error ={max_error:9.4f}"
+                    )
+        
+        else:  # train_mode == "simultaneous"
+            # ========== SIMULTANEOUS TRAINING MODE ==========
+            # Fit A_exrep and A_sr_corr together with combined loss
+            
+            _logger.info("Fitting exchange-repulsion and short-range correction parameters simultaneously...")
+            
+            # Create both loss instances
+            exrep_loss_instance = _ExchangeRepulsionLoss(emle_base, nagl, loss=_torch.nn.MSELoss())
+            sr_corr_loss_instance = _ShortRangeCorrectionLoss(emle_base, nagl, loss=_torch.nn.MSELoss())
+            
+            # Pre-compute E_static_emle, E_ind_emle for the offset
+            E_static_emle = []
+            E_ind_emle = []
+            nagl.eval()
+            for (graphs_qm_batch, _), (graphs_mm_batch, _), tensor_batch in zip(dataloader_qm, dataloader_mm, dataloader_tensors):
+                with _torch.no_grad():
+                    q_core_qm_train, q_val_qm_train, q_core_mm_train, q_val_mm_train, s_qm_train, s_mm_train, _, _, A_thole_qm_train, *mesh_data = tensor_batch
+
+                    # Static energy
+                    E_static = emle_base._get_static_energy_slater(q_core_qm_train, q_val_qm_train, q_core_mm_train, q_val_mm_train, mesh_data, s_qm_train, s_mm_train)
+                    
+                    # Induction energy
+                    charges_mm = q_core_mm_train + q_val_mm_train
+                    mask = s_qm_train > 0
+                    E_ind = emle_base.get_induced_energy(A_thole_qm_train, charges_mm, s_qm_train, mesh_data, mask)
+
+                    # Append 
+                    E_static_emle.append(E_static)
+                    E_ind_emle.append(E_ind)
+
+            E_static_emle = _torch.cat(E_static_emle)
+            E_ind_emle = _torch.cat(E_ind_emle)
+
+            dataset = _torch.utils.data.TensorDataset(E_static_emle, E_ind_emle)
+            dataloader_energy = _torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+            
+            # Optimize both A_exrep and A_sr_corr parameters together
+            opt_parameters = [
+                param
+                for name, param in nagl.named_parameters() 
+                if "A_exrep" in name or "A_sr_corr" in name
+            ]
+            _logger.info(f"Optimizing parameters: {[name for name, _ in nagl.named_parameters() if 'A_exrep' in name or 'A_sr_corr' in name]}")
+            optimizer = _torch.optim.Adam(opt_parameters, lr=lr_exrep)
+            
+            for epoch in range(epochs):
+                exrep_loss_instance.train()
+                sr_corr_loss_instance.train()
+                total_loss = 0.0
+                total_rmse_exrep = total_max_error_exrep = 0.0
+                total_rmse_sr_corr = total_max_error_sr_corr = 0.0
+                values_exrep, target_exrep = [], []
+                values_sr_corr, target_sr_corr = [], []
+                
+                for (graphs_qm_batch, _), (graphs_mm_batch, _), tensor_batch, energies_batch in zip(dataloader_qm, dataloader_mm, dataloader_tensors, dataloader_energy):
+                    optimizer.zero_grad()
+                    _, q_val_qm_train, _, q_val_mm_train, s_qm_train, s_mm_train, e_exrep_train, e_sr_corr_train, _, *mesh_data = tensor_batch
+                    e_static_train, e_ind_train = energies_batch
+                    
+                    # Compute exrep loss
+                    loss_exrep, rmse_exrep, max_error_exrep, v_exrep, t_exrep = exrep_loss_instance(
+                        graphs_qm_batch, 
+                        graphs_mm_batch, 
+                        q_val_qm_train, 
+                        q_val_mm_train, 
+                        mesh_data, 
+                        s_qm_train, 
+                        s_mm_train, 
+                        e_exrep_train
+                    )
+                    
+                    # Compute E_exrep for offset (need to recompute with current parameters)
+                    with _torch.no_grad():
+                        A_exrep_qm = nagl(graphs_qm_batch)["A_exrep"]
+                        A_exrep_mm = nagl(graphs_mm_batch)["A_exrep"]
+                        A_exrep_qm = _torch.nn.functional.pad(A_exrep_qm, (0, q_val_qm_train.size(1) - A_exrep_qm.size(1)))
+                        A_exrep_mm = _torch.nn.functional.pad(A_exrep_mm, (0, q_val_mm_train.size(1) - A_exrep_mm.size(1)))
+                        E_exrep_train = emle_base._get_exchange_repulsion_energy(A_exrep_qm, A_exrep_mm, q_val_qm_train, q_val_mm_train, mesh_data, s_qm_train, s_mm_train)
+                    
+                    # Compute sr_corr loss with offset
+                    offset = (e_static_train + e_ind_train + E_exrep_train) * 2625.5002
+                    loss_sr_corr, rmse_sr_corr, max_error_sr_corr, v_sr_corr, t_sr_corr = sr_corr_loss_instance(
+                        graphs_qm_batch,
+                        graphs_mm_batch,
+                        q_val_qm_train,
+                        q_val_mm_train,
+                        mesh_data,
+                        s_qm_train,
+                        s_mm_train,
+                        e_sr_corr_train,
+                        offset
+                    )
+                    
+                    # Combined weighted loss
+                    combined_loss = (loss_weight_exrep * loss_exrep + loss_weight_sr_corr * loss_sr_corr) / len(q_val_qm_train)
+                    combined_loss.backward(retain_graph=False)
+                    optimizer.step()
+                    
+                    # Track values for logging
+                    values_exrep.append(v_exrep.detach().cpu())
+                    target_exrep.append(t_exrep.detach().cpu())
+                    values_sr_corr.append(v_sr_corr.detach().cpu())
+                    target_sr_corr.append(t_sr_corr.detach().cpu())
+                    
+                    total_loss += combined_loss.item()
+                    total_rmse_exrep += rmse_exrep.item()
+                    total_max_error_exrep = max(total_max_error_exrep, max_error_exrep.item())
+                    total_rmse_sr_corr += rmse_sr_corr.item()
+                    total_max_error_sr_corr = max(total_max_error_sr_corr, max_error_sr_corr.item())
+
+                # Save predictions
+                values_exrep = _torch.cat(values_exrep)
+                target_exrep = _torch.cat(target_exrep)
+                values_sr_corr = _torch.cat(values_sr_corr)
+                target_sr_corr = _torch.cat(target_sr_corr)
+                
+                _np.savetxt("nagl_exrep_predicted.txt", values_exrep.numpy())
+                _np.savetxt("nagl_exrep_target.txt", target_exrep.numpy())
+                _np.savetxt("nagl_sr_corr_predicted.txt", values_sr_corr.numpy())
+                _np.savetxt("nagl_sr_corr_target.txt", target_sr_corr.numpy())
+
+                rmse_exrep = _torch.sqrt(_torch.mean((values_exrep - target_exrep) ** 2)).item()
+                max_error_exrep = _torch.max(_torch.abs(values_exrep - target_exrep)).item()
+                rmse_sr_corr = _torch.sqrt(_torch.mean((values_sr_corr - target_sr_corr) ** 2)).item()
+                max_error_sr_corr = _torch.max(_torch.abs(values_sr_corr - target_sr_corr)).item()
+
+                if (epoch + 1) % print_every == 0:
+                    _logger.info(
+                        f"Epoch {epoch+1}: Combined Loss ={total_loss:9.4f}"
+                    )
+                    _logger.info(
+                        f"  ExRep    - RMSE ={rmse_exrep:9.4f}    Max Error ={max_error_exrep:9.4f}"
+                    )
+                    _logger.info(
+                        f"  SR Corr  - RMSE ={rmse_sr_corr:9.4f}    Max Error ={max_error_sr_corr:9.4f}"
+                    )
+
+        # Save the model to a file
+        nagl.save("emle_nagl.pt")

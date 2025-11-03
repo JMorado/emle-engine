@@ -38,6 +38,7 @@ from typing import Union
 
 from . import _patches
 from . import EMLEBase as _EMLEBase
+from ._nagl import NAGLEMLE
 
 # Monkey-patch the TorchANI BuiltInModel and BuiltinEnsemble classes so that
 # they call self.aev_computer using args only to allow forward hooks to work
@@ -92,6 +93,8 @@ class EMLE(_torch.nn.Module):
         dtype=None,
         charge_penetration="slater",
         create_aev_calculator=True,
+        short_range_corr=True,
+        nagl_model="/home/joaomorado/repos/emle-bespoke/examples/DES_dimers/ws/emle_nagl.pt",
     ):
         """
         Constructor.
@@ -163,6 +166,11 @@ class EMLE(_torch.nn.Module):
             to False for derived classes that already have an AEV calculator,
             e.g. ANI2xEMLE. In that case, it's possible to hook the AEV
             calculator to avoid duplicating the computation.
+
+        short_range_corr: bool
+            Whether to include short-range correction energy terms. This has
+            the same functional form as the exchange-repulsion (exrep) term
+            and is computed using the same Slater overlap integrals.
         """
 
         # Call the base class constructor.
@@ -257,6 +265,7 @@ class EMLE(_torch.nn.Module):
 
         if dtype is not None:
             if not isinstance(dtype, _torch.dtype):
+
                 raise TypeError("'dtype' must be of type 'torch.dtype'")
         else:
             dtype = _torch.get_default_dtype()
@@ -291,6 +300,28 @@ class EMLE(_torch.nn.Module):
                 if "sqrtk_ref" in params
                 else None
             ),
+            "exrep_ref": (
+                _torch.tensor(params["exrep_ref"], dtype=dtype, device=device)
+                if "exrep_ref" in params
+                else None
+            ),
+            "A_exrep": (
+                _torch.tensor(params["A_exrep"], dtype=dtype, device=device)
+                if "A_exrep" in params
+                else None
+            ),
+            "A_short_range_corr": (
+                _torch.tensor(params["A_short_range_corr"], dtype=dtype, device=device)
+                if "A_short_range_corr" in params
+                else None
+            ),
+            "short_range_corr_ref": (
+                _torch.tensor(
+                    params["short_range_corr_ref"], dtype=dtype, device=device
+                )
+                if "short_range_corr_ref" in params
+                else None
+            ),
         }
 
         if method == "mm":
@@ -309,6 +340,11 @@ class EMLE(_torch.nn.Module):
             self._charge_penetration = charge_penetration
         else:
             raise TypeError("'charge_penetration' must be of type 'bool'")
+
+        # Validate and store short-range correction flag.
+        if not isinstance(short_range_corr, bool):
+            raise TypeError("'short_range_corr' must be of type 'bool'")
+        self._short_range_corr = short_range_corr
 
         # Store the current device.
         self._device = device
@@ -370,6 +406,10 @@ class EMLE(_torch.nn.Module):
         self._xyz_qm = _torch.empty(0, 3, dtype=dtype, device=device)
         self._xyz_mm = _torch.empty(0, 3, dtype=dtype, device=device)
 
+        if nagl_model:
+            self._nagl = NAGLEMLE(species=[1,6,7,8], properties=["A_exrep", "A_sr_corr", "s"], model_filepath=nagl_model)
+            self._calc_nagl = False
+
         # Create the base EMLE model.
         self._emle_base = _EMLEBase(
             emle_params,
@@ -379,6 +419,8 @@ class EMLE(_torch.nn.Module):
             emle_aev_computer=emle_aev_computer,
             alpha_mode=self._alpha_mode,
             species=params.get("species", self._species),
+            charge_penetration=self._charge_penetration,
+            short_range_corr=self._short_range_corr,
             device=device,
             dtype=dtype,
         )
@@ -445,6 +487,7 @@ class EMLE(_torch.nn.Module):
         xyz_qm: Tensor,
         xyz_mm: Tensor,
         qm_charge: Union[int, Tensor] = 0,
+        atomic_numbers_mm: Tensor = None,
     ) -> Tensor:
         """
         Computes the static and induced EMLE energy components.
@@ -467,11 +510,17 @@ class EMLE(_torch.nn.Module):
         qm_charge: int or torch.Tensor (BATCH,)
             The charge on the QM region.
 
+        atomic_numbers_mm: torch.Tensor (N_MM_ATOMS,) or (BATCH, N_MM_ATOMS)
+            Atomic numbers of MM atoms. This is only required if charge
+            penetration is enabled. If not provided, atomic numbers will be
+            inferred from charges (assuming water model) or from the
+            EMLE_MM_ATOMIC_NUMBERS environment variable.
+
         Returns
         -------
 
-        result: torch.Tensor (2,) or (2, BATCH)
-            The static and induced EMLE energy components in Hartree.
+        result: torch.Tensor (4,) or (4, BATCH)
+            The EMLE energy components in Hartree: [static, induced, exchange-repulsion, short-range correction].
         """
         # Store the inputs as internal attributes.
         self._atomic_numbers = atomic_numbers
@@ -487,6 +536,7 @@ class EMLE(_torch.nn.Module):
             self._xyz_mm = self._xyz_mm.unsqueeze(0)
 
         batch_size = self._atomic_numbers.shape[0]
+
 
         # Ensure qm_charge is a tensor and repeat for batch size if necessary
         if isinstance(qm_charge, int):
@@ -505,11 +555,19 @@ class EMLE(_torch.nn.Module):
             return _torch.zeros(
                 2, batch_size, dtype=self._xyz_qm.dtype, device=self._xyz_qm.device
             )
-
+        
         # Get the parameters from the base model:
         #    valence widths, core charges, valence charges, A_thole tensor
         # These are returned as batched tensors, so we need to extract the
         # first element of each.
+        """
+        s, q_core, q_val, A_thole, A_exrep, A_short_range_corr = self._emle_base(
+            self._atomic_numbers,
+            self._xyz_qm,
+            qm_charge,
+            offmols_qm
+        )
+        """
         s, q_core, q_val, A_thole = self._emle_base(
             self._atomic_numbers,
             self._xyz_qm,
@@ -536,7 +594,7 @@ class EMLE(_torch.nn.Module):
             q_val = _torch.zeros_like(
                 q_core, dtype=self._charges_mm.dtype, device=self._device
             )
-
+        
         if self._charge_penetration and self._method in ["electrostatic", "nonpol"]:
             # Charge penetration is only available for the electrostatic and nonpol methods.
             if self._charges_mm.shape[-1] != self._xyz_mm.shape[-2]:
@@ -549,68 +607,151 @@ class EMLE(_torch.nn.Module):
                 q_core_mm = self._charges_mm
                 q_val_mm = None
             else:
-                atomic_numbers_env_var = _os.getenv("EMLE_MM_ATOMIC_NUMBERS")
-                if atomic_numbers_env_var:
-                    try:
-                        atomic_numbers_mm = [int(x) for x in atomic_numbers_env_var.split(",")]
-                        if len(atomic_numbers_mm) != self._charges_mm.shape[-1]:
-                            raise ValueError("Length of EMLE_MM_ATOMIC_NUMBERS does not match number of MM atoms.")
-                        atomic_numbers_mm = _torch.tensor(atomic_numbers_mm, dtype=_torch.int64, device=self._device)
-                        atomic_numbers_mm = atomic_numbers_mm.unsqueeze(0).expand(batch_size, -1)
-                    except Exception as e:
-                        print(e)
-                        raise ValueError(f"Invalid format for EMLE_MM_ATOMIC_NUMBERS {atomic_numbers_env_var}. It should be a comma-separated list of integers.") from e
+                # Use provided atomic_numbers_mm if available
+
+                if atomic_numbers_mm is not None:
+                    # Ensure atomic_numbers_mm has correct shape and device
+                    if atomic_numbers_mm.ndim == 1:
+                        atomic_numbers_mm = atomic_numbers_mm.unsqueeze(0)
+                    atomic_numbers_mm = atomic_numbers_mm.expand(batch_size, -1).to(self._device)
                 else:
-                    # Create atomic numbers for MM atoms based on charges
-                    # Use clone() to avoid in-place operations that break gradients
-                    atomic_numbers_mm = _torch.zeros_like(self._charges_mm, dtype=_torch.int64)
-                    oxygen_mask = (self._charges_mm == -0.834)
-                    hydrogen_mask = (self._charges_mm == 0.417)
-                    atomic_numbers_mm = _torch.where(oxygen_mask, 8, atomic_numbers_mm)
-                    atomic_numbers_mm = _torch.where(hydrogen_mask, 1, atomic_numbers_mm)
+                    # Try environment variable first
+                    atomic_numbers_env_var = _os.getenv("EMLE_MM_ATOMIC_NUMBERS", None)
+                    if atomic_numbers_env_var:
+                        try:
+                            atomic_numbers_mm = [int(x) for x in atomic_numbers_env_var.split(",")]
+                            if len(atomic_numbers_mm) != self._charges_mm.shape[-1]:
+                                raise ValueError("Length of EMLE_MM_ATOMIC_NUMBERS does not match number of MM atoms.")
+                            atomic_numbers_mm = _torch.tensor(atomic_numbers_mm, dtype=_torch.int64, device=self._device)
+                            atomic_numbers_mm = atomic_numbers_mm.unsqueeze(0).expand(batch_size, -1)
+                        except Exception as e:
+                            print(e)
+                            raise ValueError(f"Invalid format for EMLE_MM_ATOMIC_NUMBERS {atomic_numbers_env_var}. It should be a comma-separated list of integers.") from e
+                    else:
+                        # Fall back to inferring from charges (assume water model)
+                        atomic_numbers_mm = _torch.zeros_like(self._charges_mm, dtype=_torch.int64)
+                        oxygen_mask = (self._charges_mm == -0.834)
+                        hydrogen_mask = (self._charges_mm == 0.417)
+                        atomic_numbers_mm = _torch.where(oxygen_mask, 8, atomic_numbers_mm)
+                        atomic_numbers_mm = _torch.where(hydrogen_mask, 1, atomic_numbers_mm)
 
-
+                        s_mm = _torch.zeros_like(self._charges_mm, dtype=self._xyz_mm.dtype)
+                        s_mm = _torch.where(oxygen_mask, 0.3943, s_mm)
+                        s_mm = _torch.where(hydrogen_mask, 0.3602, s_mm)
+                """
                 # Map to species IDs used in the model.
                 species_id_mm = self._emle_base._species_map[atomic_numbers_mm]
-                
+                mask_mm = atomic_numbers_mm > 0
                 aev_mm = self._emle_base._emle_aev_computer(species_id_mm, self._xyz_mm)
-                s_mm = self._emle_base._gpr(aev_mm, 
+              
+                s_mm, var_mm = self._emle_base._gpr(aev_mm, 
                                             self._emle_base._ref_mean_s, 
                                             self._emle_base._c_s, 
-                                            species_id_mm)
-                """
-                s_mm, q_core_mm, q_val_mm, _ = self._emle_base(
-                    atomic_numbers_mm,
-                    self._xyz_mm,
-                    qm_charge,
-                )
-                """
+                                            species_id_mm,
+                                            return_var=True)
+                
+                s_mm = s_mm * mask_mm
+  
+                #print("Slater widths for MM atoms:")
+                #print(s_mm)
+                #print(s_mm[oxygen_mask].max(), s_mm[oxygen_mask].min(), s_mm[oxygen_mask].mean())
+                #print(s_mm[hydrogen_mask].max(), s_mm[hydrogen_mask].min(), s_mm[hydrogen_mask].mean())
+
+                #A_exrep_mm = self._emle_base.predict_exrep_parameters(species_id_mm) * mask_mm
+
+                props = self._nagl_model.forward(offmols_mm, mm=True)
+                A_exrep_mm, A_short_range_corr_mm = (props.get(k) for k in ("A_exrep", "A_short_range_corr"))
+
+                #s_mm, q_core_mm, q_val_mm, _, A_exrep_mm, A_short_range_corr_mm = self._emle_base(
+                #    atomic_numbers_mm,
+                #    self._xyz_mm,
+                #    self._charges_mm.sum(dim=-1)
+                #)
+            
                 if self._charge_penetration == "slater":
                     # Slater charge penetration
+                    #q_core_mm = q_core_mm * mask_mm
+                    #q_val_mm = q_val_mm * mask_mm
                     q_core_mm = self._emle_base._q_core[species_id_mm]
                     q_val_mm = self._charges_mm - q_core_mm
-                    sigma_mm = s_mm
-                    sigma_qm = s
+                    sigma_mm = s_mm * mask_mm
+                    sigma_qm = s 
                 elif self._charge_penetration == "gaussian":
                     q_core_mm = self._charges_mm
                     q_val_mm = None
                     sigma_mm = s_mm * self._emle_base.a_QEq
                     sigma_qm = s * self._emle_base.a_QEq
+                """
+                species_id_mm = self._emle_base._species_map[atomic_numbers_mm]
+                q_core_mm = self._emle_base._q_core[species_id_mm]
+                q_val_mm = self._charges_mm - q_core_mm
 
-            E_ex_rep = self._emle_base._get_exchange_repulsion_energy(
-                q_val, q_val_mm, mesh_data, sigma_qm, sigma_mm
-            )
+                if not self._calc_nagl:
+                    offmols_qm = self._nagl.create_openff_mol(self._atomic_numbers, self._xyz_qm, qm_charge)[0]
+                    offmols_mm = self._nagl.create_openff_mol(atomic_numbers_mm[:, :3], self._xyz_mm[:, :3], qm_charge)[0]
+                    nagl_mol_qm = self._nagl._gnn_model._convert_to_nagl_molecule(offmols_qm)
+                    nagl_mol_mm = self._nagl._gnn_model._convert_to_nagl_molecule(offmols_mm)
+
+                    props_qm = self._nagl(nagl_mol_qm)
+                    props_mm = self._nagl(nagl_mol_mm)
+
+                    self._A_exrep_qm = props_qm["A_exrep"].to(self._device)
+                    self._A_sr_corr_qm = props_qm["A_sr_corr"].to(self._device)
+                    self._sigma_qm = s.to(self._device)
+
+                    A_exrep_mm = props_mm["A_exrep"]
+                    A_sr_corr_mm = props_mm["A_sr_corr"]
+                    s_mm = props_mm["s"]
+                    
+                    # Create
+                    A_exrep_mm_mapping = _torch.zeros(atomic_numbers_mm.max() + 1)
+                    A_sr_corr_mm_mapping = _torch.zeros(atomic_numbers_mm.max() + 1)
+                    s_mm_mapping = _torch.zeros(atomic_numbers_mm.max() + 1)
+
+                    # Populate
+                    A_exrep_mm_mapping[atomic_numbers_mm[:, :3]] = A_exrep_mm
+                    A_sr_corr_mm_mapping[atomic_numbers_mm[:, :3]] = A_sr_corr_mm
+                    s_mm_mapping[atomic_numbers_mm[:, :3]] = s_mm
+
+                    self._A_exrep_mm_mapping = A_exrep_mm_mapping.to(self._device)
+                    self._A_sr_corr_mm_mapping = A_sr_corr_mm_mapping.to(self._device)
+                    self._s_mm_mapping = s_mm_mapping.to(self._device)
+                    self._calc_nagl = True
+
+                A_exrep_qm = self._A_exrep_qm
+                A_sr_corr_qm = self._A_sr_corr_qm
+                sigma_qm = self._sigma_qm
+                A_exrep_mm = self._A_exrep_mm_mapping[atomic_numbers_mm]
+                A_sr_corr_mm = self._A_sr_corr_mm_mapping[atomic_numbers_mm]
+                s_mm = self._s_mm_mapping[atomic_numbers_mm]
+                sigma_mm = s_mm
+
+
+            E_exrep = self._emle_base._get_exchange_repulsion_energy(A_exrep_qm, A_exrep_mm, q_val, q_val_mm, mesh_data, sigma_qm, sigma_mm)
         else:
             sigma_mm = None
             sigma_qm = None
             q_core_mm = self._charges_mm
             q_val_mm = None
-            E_ex_rep = _torch.zeros(batch_size, dtype=self._xyz_qm.dtype, device=self._xyz_qm.device)
+            E_exrep = _torch.zeros(batch_size, dtype=self._xyz_qm.dtype, device=self._xyz_qm.device)
+            A_sr_corr_qm = None
+
+        # Compute short-range correction energy if enabled
+        if self._short_range_corr and A_sr_corr_qm is not None:
+            if sigma_mm is not None and sigma_qm is not None:
+                # Predict short-range correction parameters for MM atoms
+                #A_short_range_corr_mm = self._emle_base.predict_short_range_corr_parameters(species_id_mm) * mask_mm
+                E_short_range_corr = self._emle_base._get_short_range_corr_energy(A_sr_corr_qm, A_sr_corr_mm, q_val, q_val_mm, mesh_data, sigma_qm, sigma_mm)
+            else:
+                E_short_range_corr = _torch.zeros(batch_size, dtype=self._xyz_qm.dtype, device=self._xyz_qm.device)
+        else:
+            E_short_range_corr = _torch.zeros(batch_size, dtype=self._xyz_qm.dtype, device=self._xyz_qm.device)
+
 
         if self._method == "mm":
-            q_core_mm = self._q_core_mm.expand(batch_size, -1)
-            q_val_mm = _torch.zeros_like(
-                q_core_mm, dtype=self._charges_mm.dtype, device=self._device
+            q_core = self._q_core_mm.expand(batch_size, -1)
+            q_val = _torch.zeros_like(
+                q_core, dtype=self._charges_mm.dtype, device=self._device
             )
 
         E_static = self._emle_base.get_static_energy(
@@ -625,6 +766,15 @@ class EMLE(_torch.nn.Module):
         else:
             E_ind = _torch.zeros_like(
                 E_static, dtype=self._charges_mm.dtype, device=self._device
-            )   
+            )
 
-        return _torch.stack((E_static*0, E_ind*0, E_ex_rep, _torch.zeros_like(E_static)), dim=0)
+        if self._method == "electrostatic":
+            HARTREE_TO_KCALMOL = 627.5094740631
+            print(
+                f"EMLE static: {E_static.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                f"induced: {E_ind.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                f"exrep: {E_exrep.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                f"short-range corr: {E_short_range_corr.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol"
+            )
+     
+        return _torch.stack((E_static, E_ind, E_exrep, E_short_range_corr), dim=0)

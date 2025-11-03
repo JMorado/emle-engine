@@ -36,6 +36,8 @@ from typing import Tuple
 
 import torchani as _torchani
 
+from . import _patches
+
 try:
     import NNPOps as _NNPOps
 
@@ -45,6 +47,9 @@ try:
 except:
     _has_nnpops = False
 
+
+PER_ATOMIC_NUMBER_PARAMS = False
+from openff.toolkit import Molecule
 
 class EMLEBase(_torch.nn.Module):
     """
@@ -66,6 +71,9 @@ class EMLEBase(_torch.nn.Module):
         emle_aev_computer=None,
         species=None,
         alpha_mode="species",
+        charge_penetration=None,
+        short_range_corr=False,
+        nagl_model=None,
         device=None,
         dtype=None,
     ):
@@ -101,6 +109,12 @@ class EMLEBase(_torch.nn.Module):
         species: List[int], Tuple[int], numpy.ndarray, torch.Tensor
             List of species (atomic numbers) supported by the EMLE model.
 
+        charge_penetration: str
+            The charge penetration mode. Options are "slater" or None.
+
+        short_range_corr: bool
+            Whether to enable short-range correction energy terms.
+
         device: torch.device
             The device on which to run the model.
 
@@ -116,11 +130,19 @@ class EMLEBase(_torch.nn.Module):
             raise TypeError("'params' must be of type 'dict'")
         if not all(
             k in params
-            for k in ["a_QEq", "a_Thole", "ref_values_s", "ref_values_chi", "k_Z"]
+            for k in ["a_QEq", "a_Thole", "ref_values_s", "ref_values_chi", "k_Z", "exrep_ref", "short_range_corr_ref"]
         ):
             raise ValueError(
-                "'params' must contain keys 'a_QEq', 'a_Thole', 'ref_values_s', 'ref_values_chi', and 'k_Z'"
+                "'params' must contain keys 'a_QEq', 'a_Thole', 'ref_values_s', 'ref_values_chi', 'k_Z', 'exrep_ref', and 'short_range_corr_ref'"
             )
+        
+        # Store charge penetration mode
+        self._charge_penetration = charge_penetration
+
+        # Validate and store short-range correction flag.
+        if not isinstance(short_range_corr, bool):
+            raise TypeError("'short_range_corr' must be of type 'bool'")
+        self._short_range_corr = short_range_corr
 
         # Validate the number of references.
         if not isinstance(n_ref, _torch.Tensor):
@@ -205,7 +227,25 @@ class EMLEBase(_torch.nn.Module):
                     "using 'reference' alpha mode."
                 )
                 raise ValueError(msg)
+        """
+        # Exchange-repulsion parameters
+        if charge_penetration == "slater":
+            self.A_exrep = _torch.nn.Parameter(params.get("A_exrep", self.k_Z.clone())).to(device=device, dtype=dtype)
+            self.ref_values_exrep = _torch.nn.Parameter(params.get("exrep_ref", self.ref_values_s.clone()))
+            if len(self.ref_values_exrep) != len(self.ref_values_s):
+                self.ref_values_exrep = _torch.nn.Parameter(self.ref_values_s.clone())
+            if len(self.A_exrep) != len(self.k_Z):
+                self.A_exrep = _torch.nn.Parameter(_torch.ones_like(self.k_Z, device=device, dtype=dtype))
 
+        # Short-range correction parameters
+        if short_range_corr:
+            self.ref_values_short_range_corr = _torch.nn.Parameter(params.get("short_range_corr_ref", self.ref_values_s.clone()))
+            self.A_short_range_corr = _torch.nn.Parameter(params.get("A_short_range_corr", _torch.ones_like(self.k_Z, device=device, dtype=dtype)))
+            if len(self.ref_values_short_range_corr) != len(self.ref_values_s):
+                self.ref_values_short_range_corr = _torch.nn.Parameter(self.ref_values_s.clone())
+            if len(self.A_short_range_corr) != len(self.k_Z):
+                self.A_short_range_corr = _torch.nn.Parameter(_torch.ones_like(self.k_Z, device=device, dtype=dtype))
+        """
         # Validate the species.
         if species is None:
             # Use the default species.
@@ -240,7 +280,23 @@ class EMLEBase(_torch.nn.Module):
             c_sqrtk = _torch.zeros_like(c_s, dtype=dtype, device=device)
         else:
             ref_mean_sqrtk, c_sqrtk = self._get_c(n_ref, self.ref_values_sqrtk, Kinv)
+        
+        """
+        # Initialize exchange-repulsion GPR coefficients (A_exrep).
+        if charge_penetration == "slater":
+            ref_mean_exrep, c_exrep = self._get_c(n_ref, self.ref_values_exrep, Kinv)
+        else:
+            ref_mean_exrep = _torch.zeros_like(ref_mean_s, dtype=dtype, device=device)
+            c_exrep = _torch.zeros_like(c_s, dtype=dtype, device=device)
 
+
+        # Initialize short-range correction GPR coefficients (same functional form as exrep).
+        if short_range_corr:
+            ref_mean_short_range_corr, c_short_range_corr = self._get_c(n_ref, self.ref_values_short_range_corr, Kinv)
+        else:
+            ref_mean_short_range_corr = _torch.zeros_like(ref_mean_s, dtype=dtype, device=device)
+            c_short_range_corr = _torch.zeros_like(c_s, dtype=dtype, device=device)
+        """
         # Store the current device.
         self._device = device
 
@@ -249,6 +305,7 @@ class EMLEBase(_torch.nn.Module):
         self.register_buffer("_Kinv", Kinv)
         self.register_buffer("_q_core", q_core)
         self.register_buffer("_ref_features", ref_features)
+        self.register_buffer("_Kinv", Kinv)
         self.register_buffer("_n_ref", n_ref)
         self.register_buffer("_ref_mean_s", ref_mean_s)
         self.register_buffer("_ref_mean_chi", ref_mean_chi)
@@ -256,6 +313,18 @@ class EMLEBase(_torch.nn.Module):
         self.register_buffer("_c_s", c_s)
         self.register_buffer("_c_chi", c_chi)
         self.register_buffer("_c_sqrtk", c_sqrtk)
+
+        """
+        self.register_buffer("_ref_mean_exrep", ref_mean_exrep)
+        self.register_buffer("_c_exrep", c_exrep)
+        self.register_buffer("_ref_mean_short_range_corr", ref_mean_short_range_corr)
+        self.register_buffer("_c_short_range_corr", c_short_range_corr)
+
+        self._nagl_model = nagl_model
+        self._nagl_model.train()
+        self._nagl_model.to(self._device)
+        self._off_mol = Molecule.from_smiles("CC(=O)O")
+        """
 
     def to(self, *args, **kwargs):
         """
@@ -266,6 +335,7 @@ class EMLEBase(_torch.nn.Module):
         self._Kinv = self._Kinv.to(*args, **kwargs)
         self._q_core = self._q_core.to(*args, **kwargs)
         self._ref_features = self._ref_features.to(*args, **kwargs)
+        self._Kinv = self._Kinv.to(*args, **kwargs)
         self._n_ref = self._n_ref.to(*args, **kwargs)
         self._ref_mean_s = self._ref_mean_s.to(*args, **kwargs)
         self._ref_mean_chi = self._ref_mean_chi.to(*args, **kwargs)
@@ -273,6 +343,10 @@ class EMLEBase(_torch.nn.Module):
         self._c_s = self._c_s.to(*args, **kwargs)
         self._c_chi = self._c_chi.to(*args, **kwargs)
         self._c_sqrtk = self._c_sqrtk.to(*args, **kwargs)
+        self._ref_mean_exrep = self._ref_mean_exrep.to(*args, **kwargs)
+        self._c_exrep = self._c_exrep.to(*args, **kwargs)
+        self._ref_mean_short_range_corr = self._ref_mean_short_range_corr.to(*args, **kwargs)
+        self._c_short_range_corr = self._c_short_range_corr.to(*args, **kwargs)
         self.k_Z = _torch.nn.Parameter(self.k_Z.to(*args, **kwargs))
 
         # Check for a device type in args and update the device attribute.
@@ -292,6 +366,7 @@ class EMLEBase(_torch.nn.Module):
         self._Kinv = self._Kinv.cuda(**kwargs)
         self._q_core = self._q_core.cuda(**kwargs)
         self._ref_features = self._ref_features.cuda(**kwargs)
+        self._Kinv = self._Kinv.cuda(**kwargs)
         self._n_ref = self._n_ref.cuda(**kwargs)
         self._ref_mean_s = self._ref_mean_s.cuda(**kwargs)
         self._ref_mean_chi = self._ref_mean_chi.cuda(**kwargs)
@@ -299,6 +374,10 @@ class EMLEBase(_torch.nn.Module):
         self._c_s = self._c_s.cuda(**kwargs)
         self._c_chi = self._c_chi.cuda(**kwargs)
         self._c_sqrtk = self._c_sqrtk.cuda(**kwargs)
+        self._ref_mean_exrep = self._ref_mean_exrep.cuda(**kwargs)
+        self._c_exrep = self._c_exrep.cuda(**kwargs)
+        self._ref_mean_short_range_corr = self._ref_mean_short_range_corr.cuda(**kwargs)
+        self._c_short_range_corr = self._c_short_range_corr.cuda(**kwargs)
         self.k_Z = _torch.nn.Parameter(self.k_Z.cuda(**kwargs))
 
         # Update the device attribute.
@@ -315,13 +394,18 @@ class EMLEBase(_torch.nn.Module):
         self._Kinv = self._Kinv.cpu(**kwargs)
         self._q_core = self._q_core.cpu(**kwargs)
         self._ref_features = self._ref_features.cpu(**kwargs)
+        self._Kinv = self._Kinv.cpu(**kwargs)
         self._n_ref = self._n_ref.cpu(**kwargs)
         self._ref_mean_s = self._ref_mean_s.cpu(**kwargs)
         self._ref_mean_chi = self._ref_mean_chi.cpu(**kwargs)
-        self._ref_mean_sqrtk = self._ref_mean_sqrtk.to(**kwargs)
+        self._ref_mean_sqrtk = self._ref_mean_sqrtk.cpu(**kwargs)
         self._c_s = self._c_s.cpu(**kwargs)
         self._c_chi = self._c_chi.cpu(**kwargs)
         self._c_sqrtk = self._c_sqrtk.cpu(**kwargs)
+        self._ref_mean_exrep = self._ref_mean_exrep.cpu(**kwargs)
+        self._c_exrep = self._c_exrep.cpu(**kwargs)
+        self._ref_mean_short_range_corr = self._ref_mean_short_range_corr.cpu(**kwargs)
+        self._c_short_range_corr = self._c_short_range_corr.cpu(**kwargs)
         self.k_Z = _torch.nn.Parameter(self.k_Z.cpu(**kwargs))
 
         # Update the device attribute.
@@ -337,12 +421,18 @@ class EMLEBase(_torch.nn.Module):
         self._Kinv = self._Kinv.double()
         self._q_core = self._q_core.double()
         self._ref_features = self._ref_features.double()
+        self._Kinv = self._Kinv.double()
+        self._n_ref = self._n_ref.double()
         self._ref_mean_s = self._ref_mean_s.double()
         self._ref_mean_chi = self._ref_mean_chi.double()
         self._ref_mean_sqrtk = self._ref_mean_sqrtk.double()
         self._c_s = self._c_s.double()
         self._c_chi = self._c_chi.double()
         self._c_sqrtk = self._c_sqrtk.double()
+        self._ref_mean_exrep = self._ref_mean_exrep.double()
+        self._c_exrep = self._c_exrep.double()
+        self._ref_mean_short_range_corr = self._ref_mean_short_range_corr.double()
+        self._c_short_range_corr = self._c_short_range_corr.double()
         self.k_Z = _torch.nn.Parameter(self.k_Z.double())
         return self
 
@@ -354,19 +444,23 @@ class EMLEBase(_torch.nn.Module):
         self._Kinv = self._Kinv.float()
         self._q_core = self._q_core.float()
         self._ref_features = self._ref_features.float()
+        self._Kinv = self._Kinv.float()
         self._ref_mean_s = self._ref_mean_s.float()
         self._ref_mean_chi = self._ref_mean_chi.float()
         self._ref_mean_sqrtk = self._ref_mean_sqrtk.float()
         self._c_s = self._c_s.float()
         self._c_chi = self._c_chi.float()
         self._c_sqrtk = self._c_sqrtk.float()
+        self._ref_mean_exrep = self._ref_mean_exrep.float()
+        self._c_exrep = self._c_exrep.float()
+        self._ref_mean_short_range_corr = self._ref_mean_short_range_corr.float()
+        self._c_short_range_corr = self._c_short_range_corr.float()
         self.k_Z = _torch.nn.Parameter(self.k_Z.float())
         return self
 
     def forward(self, atomic_numbers, xyz_qm, q_total):
         """
-        Compute the valence widths, core charges, valence charges, and
-        A_thole tensor for a batch of QM systems.
+        Compute the valence widths, core charges, valence charges, A_thole tensor, and optionally short-range correction parameters.
 
         Parameters
         ----------
@@ -386,8 +480,10 @@ class EMLEBase(_torch.nn.Module):
         result: (torch.Tensor (N_BATCH, N_QM_ATOMS,),
                  torch.Tensor (N_BATCH, N_QM_ATOMS,),
                  torch.Tensor (N_BATCH, N_QM_ATOMS,),
-                 torch.Tensor (N_BATCH, N_QM_ATOMS * 3, N_QM_ATOMS * 3,))
-            Valence widths, core charges, valence charges, A_thole tensor
+                 torch.Tensor (N_BATCH, N_QM_ATOMS * 3, N_QM_ATOMS * 3,),
+                 torch.Tensor (N_BATCH, N_QM_ATOMS,) or None,
+                 torch.Tensor (N_BATCH, N_QM_ATOMS,) or None)
+            Valence widths, core charges, valence charges, A_thole tensor, A_exrep parameters, A_short_range_corr parameters
         """
 
         # Mask for padded coordinates.
@@ -400,7 +496,12 @@ class EMLEBase(_torch.nn.Module):
         aev = self._emle_aev_computer(species_id, xyz_qm)
 
         # Compute the MBIS valence shell widths.
-        s = self._gpr(aev, self._ref_mean_s, self._c_s, species_id)
+        s, var = self._gpr(aev, self._ref_mean_s, self._c_s, species_id, return_var=True)
+
+        # DELETE THIS LATER
+        var_row = var.detach().cpu().numpy().reshape(1, -1)  
+        #with open("output.txt", "ab") as f:
+        #    _np.savetxt(f, var_row, fmt='%f', delimiter=' ')       
 
         # Compute the electronegativities.
         chi = self._gpr(aev, self._ref_mean_chi, self._c_chi, species_id)
@@ -415,7 +516,7 @@ class EMLEBase(_torch.nn.Module):
         q = self._get_q(r_data, s, chi, q_total, mask)
         q_val = q - q_core
 
-        k = self.k_Z[species_id]
+        k = self.k_Z[species_id] * mask
 
         if self._alpha_mode == "reference":
             k_scale = (
@@ -424,8 +525,72 @@ class EMLEBase(_torch.nn.Module):
             k = k_scale * k
 
         A_thole = self._get_A_thole(r_data, s, q_val, k, self.a_Thole)
+        A_exrep=None
+        A_short_range_corr=None
+        """
+        props = self._nagl_model.forward(offmols_qm)
+        A_exrep, A_short_range_corr = (props.get(k) for k in ("A_exrep", "A_short_range_corr"))
+        print(A_exrep, A_short_range_corr)
+      
+        if self._charge_penetration == "slater":
+            if not PER_ATOMIC_NUMBER_PARAMS:
+                A_exrep = self._nagl_model._compute_properties(self._off_mol, as_numpy=False)["A_exrep"].reshape(1, -1)
+                #A_exrep = self._gpr(aev, self._ref_mean_exrep, self._c_exrep, species_id) 
+            else:
+                A_exrep = self.A_exrep[species_id] * (species_id >= 0).float()
+        else:
+            A_exrep = None
 
-        return s, q_core, q_val, A_thole
+        if self._short_range_corr:
+            if not PER_ATOMIC_NUMBER_PARAMS:
+                A_short_range_corr = self._gpr(aev, self._ref_mean_short_range_corr, self._c_short_range_corr, species_id) ** 2
+            else:
+                A_short_range_corr = self.A_short_range_corr[species_id] * (species_id >= 0).float()
+        else:
+            A_short_range_corr = None
+        """
+        return s, q_core, q_val, A_thole#, A_exrep, A_short_range_corr
+
+    @staticmethod
+    def _get_short_range_corr_energy(A_short_range_corr_qm: Tensor, A_short_range_corr_mm: Tensor, q_val_qm: Tensor, q_val_mm: Tensor, mesh_data: Tensor, s_qm: Tensor, s_mm: Tensor, S=None) -> Tensor:
+        """
+        Calculate the short-range correction energy between QM and MM valence Slater charge distributions.
+        This has exactly the same functional form as the exchange-repulsion energy.
+
+        Parameters
+        ----------
+        A_short_range_corr_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Short-range correction parameters for QM atoms.
+        
+        A_short_range_corr_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Short-range correction parameters for MM atoms.
+
+        q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            QM valence charges.
+
+        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            MM valence charges.
+
+        mesh_data: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
+            Mesh data object (output of self._get_mesh_data)
+
+        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Slater widths for QM atoms.
+
+        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Slater widths for MM atoms.
+
+        Returns
+        -------
+        result: torch.Tensor (N_BATCH,)
+            Short-range correction energy.
+        """
+        mask_s = (s_qm > 0)[:, :, None] & (s_mm > 0)[:, None, :]
+        A_short_range_corr = A_short_range_corr_qm[:, :, None] * A_short_range_corr_mm[:, None, :]
+        r = _torch.where(mesh_data[0] > 0, 1.0 / (mesh_data[0] + 1e-16), 0.0)
+        S = EMLEBase._get_slater_overlap(s_qm, s_mm, r)
+        q_prod = q_val_qm[:, :, None] * q_val_mm[:, None, :]
+        return -_torch.sum(q_prod * S * A_short_range_corr * mask_s, dim=(1,2))
 
     @classmethod
     def _get_Kinv(cls, ref_features, sigma):
@@ -464,7 +629,7 @@ class EMLEBase(_torch.nn.Module):
         ref_shifted = (ref - ref_mean[:, None]) * mask
         return ref_mean, (Kinv @ ref_shifted[:, :, None]).squeeze()
 
-    def _gpr(self, mol_features, ref_mean, c, zid):
+    def _gpr(self, mol_features, ref_mean, c, zid, return_var=False):
         """
         Internal method to predict a property using Gaussian Process Regression.
 
@@ -483,16 +648,22 @@ class EMLEBase(_torch.nn.Module):
         zid: torch.Tensor (N_BATCH, N_ATOMS,)
             The species identity value of each atom.
 
+        return_var: bool
+            Whether to return the variance of the prediction.
+
         Returns
         -------
 
         result: torch.Tensor (N_BATCH, N_ATOMS)
             The values of the predicted property for each atom.
         """
-
         result = _torch.zeros(
             zid.shape, dtype=mol_features.dtype, device=mol_features.device
         )
+
+        if return_var:
+            var = _torch.zeros_like(result)
+
         for i in range(len(self._n_ref)):
             n_ref = self._n_ref[i]
             ref_features_z = self._ref_features[i, :n_ref]
@@ -501,7 +672,13 @@ class EMLEBase(_torch.nn.Module):
             K_mol_ref2 = (mol_features_z @ ref_features_z.T) ** 2
             result[zid == i] = K_mol_ref2 @ c[i, :n_ref] + ref_mean[i]
 
-        return result
+            if return_var:
+                K_inv = self._Kinv[i, :n_ref, :n_ref] 
+                tmp = K_mol_ref2 @ K_inv               
+                var[zid == i] = 1.0 - _torch.sum(tmp * K_mol_ref2, dim=1)  
+
+        return result if not return_var else (result, var)
+
 
     @classmethod
     def _get_r_data(cls, xyz, mask):
@@ -842,13 +1019,6 @@ class EMLEBase(_torch.nn.Module):
             vpot_q_core = EMLEBase._get_vpot_q(q_core, mesh_data[0])
             vpot_q_val = EMLEBase._get_vpot_q(q_val, mesh_data[1])
             vpot_static = vpot_q_core + vpot_q_val
-            
-            # Handle size mismatch between vpot_static and q_core_mm
-            if vpot_static.shape[1] != q_core_mm.shape[1]:
-                min_size = min(vpot_static.shape[1], q_core_mm.shape[1])
-                vpot_static = vpot_static[:, :min_size]
-                q_core_mm = q_core_mm[:, :min_size]
-            
             return _torch.sum(vpot_static * q_core_mm, dim=1)
 
     @staticmethod
@@ -889,13 +1059,19 @@ class EMLEBase(_torch.nn.Module):
         r = _torch.where(r_inv > 0, 1.0 / (r_inv + 1e-16), 0.0)
         T0_slater_mm_qm = EMLEBase._get_T0_slater(r.permute(0, 2, 1), s_mm[:, :, None])
 
+        # Mask out interactions involving padded atoms
+        mask_s = (s_qm != 0)[:, :, None] & (s_mm != 0)[:, None, :]
+        T0_slater_qm_mm = T0_slater_qm_mm * mask_s
+        T0_slater_mm_qm = T0_slater_mm_qm * mask_s.permute(0, 2, 1)
+        r_inv = r_inv * mask_s
+
         # Calculate electrostatic energy components
         E_core_core = _torch.sum(EMLEBase._get_vpot_q(q_core_qm, r_inv) * q_core_mm, dim=1)
         E_val_core = _torch.sum(EMLEBase._get_vpot_q(q_val_qm, T0_slater_qm_mm) * q_core_mm, dim=1)
         E_core_val = _torch.sum(EMLEBase._get_vpot_q(q_val_mm, T0_slater_mm_qm) * q_core_qm, dim=1)
         E_val_val = EMLEBase._get_valence_repulsion(q_val_qm, q_val_mm, r, s_qm, s_mm)
-
-        return E_val_core + E_core_val + E_val_val + E_core_core
+        total = E_val_core + E_core_val + E_val_val + E_core_core
+        return total
     
      
     @staticmethod
@@ -942,21 +1118,28 @@ class EMLEBase(_torch.nn.Module):
             f = (1 - term1) / (r + 1e-16) - term2 - term3
             return f
 
+        s_mask = (s_qm > 0)[:, :, None] & (s_mm > 0)[:, None, :]
         s_qm = s_qm[:, :, None]
         s_mm = s_mm[:, None, :]
         cp_corr_diff = (1 - f_diff(s_qm, s_mm, r) - f_diff(s_mm, s_qm, r)) / (r + 1e-16)
         cp_corr_same = f_same(s_qm, s_mm, r)
-        cp_corr = _torch.where(_torch.abs(s_qm - s_mm) < 1e-3, cp_corr_same, cp_corr_diff)
-        return _torch.sum(q_val_qm[:, :, None] * q_val_mm[:, None, :] * cp_corr, dim=(1,2))
+        cp_corr = _torch.where(_torch.abs(s_qm - s_mm) < 1e-2, cp_corr_same, cp_corr_diff)
+        return _torch.sum(q_val_qm[:, :, None] * q_val_mm[:, None, :] * cp_corr * s_mask, dim=(1,2))
 
 
     @staticmethod
-    def _get_exchange_repulsion_energy(q_val_qm: Tensor, q_val_mm: Tensor, mesh_data: Tensor, s_qm: Tensor, s_mm: Tensor) -> Tensor:
+    def _get_exchange_repulsion_energy(A_exrep_qm: Tensor, A_exrep_mm: Tensor, q_val_qm: Tensor, q_val_mm: Tensor, mesh_data: Tensor, s_qm: Tensor, s_mm: Tensor) -> Tensor:
         """
         Calculate the exchange-repulsion energy between QM and MM valence Slater charge distributions.
 
         Parameters
         ----------
+        A_exrep_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Exchange-repulsion parameters for QM atoms.
+        
+        A_exrep_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Exchange-repulsion parameters for MM atoms.
+
         q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
             QM valence charges.
 
@@ -977,10 +1160,12 @@ class EMLEBase(_torch.nn.Module):
         result: torch.Tensor (N_BATCH,)
             Exchange-repulsion energy.
         """
-        alpha = 8.13
+        mask_s = (s_qm > 0)[:, :, None] & (s_mm > 0)[:, None, :]
+        A_exrep = A_exrep_qm[:, :, None] * A_exrep_mm[:, None, :] 
         r = _torch.where(mesh_data[0] > 0, 1.0 / (mesh_data[0] + 1e-16), 0.0)
-        S = EMLEBase._get_slater_overlap(s_qm, s_mm, r)
-        return _torch.sum(q_val_qm[:, :, None] * q_val_mm[:, None, :] * S, dim=(1,2)) * alpha
+        S = EMLEBase._get_slater_overlap(s_qm, s_mm, r)         
+        q_prod = q_val_qm[:, :, None] * q_val_mm[:, None, :]
+        return _torch.sum(q_prod * S * A_exrep * mask_s, dim=(1,2))
 
 
     @staticmethod
@@ -1020,13 +1205,42 @@ class EMLEBase(_torch.nn.Module):
             term2 = s_diff / (384*si**4 + 1e-16) * (-9 - 9*x - 2*x**2 + x**3) * exp_x
             term3 = s_diff**2 / (3840*si**5 + 1e-16) * (90 + 90*x + 5*x**2 - 25*x**3 + 3*x**4) * exp_x
             return term1 + term2 + term3
-        
+
+        # Broadcast QM x MM
+        s_qm_exp = s_qm.unsqueeze(-1).expand(-1, -1, s_mm.size(1))
+        s_mm_exp = s_mm.unsqueeze(1).expand(-1, s_qm.size(1), -1)
+        mask_s = (s_qm_exp > 0) & (s_mm_exp > 0)
+
+        # Initialize result tensor
+        S = _torch.zeros_like(r)
+
+        # Masks
+        equal_mask = _torch.abs(s_qm_exp - s_mm_exp) < 1e-2
+        diff_mask = ~equal_mask
+
+        # Compute only on the elements where needed
+        if equal_mask.any():
+            si_eq = s_qm_exp[equal_mask]
+            sj_eq = s_mm_exp[equal_mask]
+            r_eq = r[equal_mask]
+            S[equal_mask] = h_same(si_eq, sj_eq, r_eq)
+
+        if diff_mask.any():
+            si_diff = s_qm_exp[diff_mask]
+            sj_diff = s_mm_exp[diff_mask]
+            r_diff = r[diff_mask]
+            S[diff_mask] = (h_diff(si_diff, sj_diff, r_diff) + h_diff(sj_diff, si_diff, r_diff)) / (8 * _torch.pi * r_diff + 1e-16)
+
+        return S * mask_s
+        """
         s_qm = s_qm[:, :, None]
         s_mm = s_mm[:, None, :]
         S_diff = (h_diff(s_qm, s_mm, r) + h_diff(s_mm, s_qm, r)) / (8 * _torch.pi * r + 1e-16)
         S_equal = h_same(s_qm, s_mm, r) 
-        return _torch.where(_torch.abs(s_qm - s_mm) < 1e-3, S_equal, S_diff)
- 
+        equal_mask = _torch.abs(s_qm - s_mm) < 1e-2
+        S = _torch.where(equal_mask, S_equal, S_diff)
+        return S
+        """
 
     @staticmethod
     def _get_T0_cp(r: Tensor, sigma_qm: Tensor, sigma_mm: Tensor) -> Tensor:
@@ -1144,13 +1358,13 @@ class EMLEBase(_torch.nn.Module):
         q: torch.Tensor (N_BATCH, MAX_MM_ATOMS,)
             MM point charges.
 
-        s: torch.Tensor (N_BATCH, N_QM_ATOMS,)
+        s: torch.Tensor (N_BATCH, MAX_QM_ATOMS,)
             MBIS valence shell widths.
 
-        q_val: torch.Tensor (N_BATCH, N_QM_ATOMS,)
+        q_val: torch.Tensor (N_BATCH, MAX_QM_ATOMS,)
             MBIS valence charges.
 
-        mask: torch.Tensor (N_BATCH, N_QM_ATOMS)
+        mask: torch.Tensor (N_BATCH, MAX_QM_ATOMS)
             Mask for padded coordinates.
 
         Returns
@@ -1160,7 +1374,6 @@ class EMLEBase(_torch.nn.Module):
             Array of induced dipoles
         """
         r = 1.0 / mesh_data[0]
-        f1 = _torch.where(mask, EMLEBase._get_f1_slater(r, s[:, :, None] * 2.0), 0.0)
         fields = _torch.sum(
             mesh_data[2] * q[:, None, :, None], dim=2
         ).reshape(len(s), -1)
@@ -1299,3 +1512,69 @@ class EMLEBase(_torch.nn.Module):
         results: torch.Tensor (N_BATCH, MAX_QM_ATOMS, MAX_MM_ATOMS)
         """
         return (1 - (1 + r / (s * 2 + 1e-16)) * _torch.exp(-r / (s + 1e-16))) / (r + 1e-16)
+
+    def predict_exrep_parameters(self, species_id, atomic_numbers=None, xyz=None, aev=None):
+        """
+        Predict exchange-repulsion parameters for atoms using GPR.
+
+        Parameters
+        ----------
+        species_id: torch.Tensor (N_BATCH, N_ATOMS)
+            Species identity values of atoms.
+
+        atomic_numbers: torch.Tensor (N_BATCH, N_ATOMS)
+            Atomic numbers of atoms. Required if aev is not provided.
+
+        xyz: torch.Tensor (N_BATCH, N_ATOMS, 3), optional
+            Positions of atoms in Angstrom. Required if aev is not provided.
+
+        aev: torch.Tensor (N_BATCH, N_ATOMS, N_FEAT), optional
+            Pre-computed AEV features. If provided, xyz is not needed.
+
+        Returns
+        -------
+        exrep_params: torch.Tensor (N_BATCH, N_ATOMS)
+            Predicted exchange-repulsion parameters.
+        """
+        # Compute AEVs if not provided
+        if aev is None:
+            mol = Molecule.from_smiles("O")
+            exrep_params = self._nagl_model._compute_properties(mol, as_numpy=False)["A_exrep"].reshape(1, -1)
+        else:
+            exrep_params = self._gpr(aev, self._ref_mean_exrep, self._c_exrep, species_id)
+
+        return exrep_params
+
+    def predict_short_range_corr_parameters(self, species_id, atomic_numbers=None, xyz=None, aev=None):
+        """
+        Predict short-range correction parameters for atoms using GPR.
+        This has exactly the same functional form as predict_exrep_parameters.
+
+        Parameters
+        ----------
+        species_id: torch.Tensor (N_BATCH, N_ATOMS)
+            Species identity values of atoms.
+
+        atomic_numbers: torch.Tensor (N_BATCH, N_ATOMS)
+            Atomic numbers of atoms. Required if aev is not provided.
+
+        xyz: torch.Tensor (N_BATCH, N_ATOMS, 3), optional
+            Positions of atoms in Angstrom. Required if aev is not provided.
+
+        aev: torch.Tensor (N_BATCH, N_ATOMS, N_FEAT), optional
+            Pre-computed AEV features. If provided, xyz is not needed.
+
+        Returns
+        -------
+        short_range_corr_params: torch.Tensor (N_BATCH, N_ATOMS)
+            Predicted short-range correction parameters.
+        """
+        if not self._short_range_corr:
+            raise RuntimeError("Short-range correction is not enabled for this model")
+            
+        if aev is None:
+            short_range_corr_params = self.A_short_range_corr[species_id] * (species_id >= 0).float()
+        else:
+            short_range_corr_params = self._gpr(aev, self._ref_mean_short_range_corr, self._c_short_range_corr, species_id)
+ 
+        return short_range_corr_params

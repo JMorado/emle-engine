@@ -29,3 +29,4 @@ from ._emle_base import EMLEBase
 from ._emle import EMLE
 from ._ani import ANI2xEMLE
 from ._mace import MACEEMLE
+from ._nagl import NAGLEMLE

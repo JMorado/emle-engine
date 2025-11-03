@@ -23,7 +23,7 @@
 """Module for loss functions."""
 
 import torch as _torch
-
+import numpy as _np
 
 class _BaseLoss(_torch.nn.Module):
     """
@@ -311,3 +311,252 @@ class TholeLoss(_BaseLoss):
             emle_base.ref_values_sqrtk,
             emle_base._Kinv,
         )
+
+
+class ExchangeRepulsionLoss(_BaseLoss):
+    """
+    Loss function for the EMLENAGL model. Used to train A_exrep.
+
+    Parameters
+    ----------
+
+    emle_base: EMLEBase
+        EMLEBase object.
+
+    loss: torch.nn.Module, optional, default=torch.nn.MSELoss()
+        Loss function.
+
+    Attributes
+    ----------
+
+    _emle: EMLE
+        EMLE object.
+
+    _loss: torch.nn.Module
+        Loss function.
+    """
+
+    def __init__(self, emle_base, nagl_model, loss=_torch.nn.MSELoss()):
+        super().__init__()
+        from ..models._emle_base import EMLEBase
+        from ..models import NAGLEMLE
+
+        if not isinstance(emle_base, EMLEBase):
+            raise TypeError("emle_base must be an instance of EMLEBase")
+        self._emle_base = emle_base
+
+        if not isinstance(nagl_model, NAGLEMLE):
+            raise TypeError("nagl_model must be an instance of NAGLEMLE")
+        self._nagl_model = nagl_model
+
+        if not isinstance(loss, _torch.nn.Module):
+            raise TypeError("loss must be an instance of torch.nn.Module")
+        self._loss = loss
+
+    def forward(self, graphs_qm, graphs_mm, q_val_qm, q_val_mm, mesh_data, s_qm, s_mm, target):
+        """
+        Forward pass.
+
+        Parameters
+        ----------
+        graphs_qm: Any
+            Graphs for the QM region.
+
+        graphs_mm: Any
+            Graphs for the MM region.
+
+        q_val_qm: torch.Tensor(N_BATCH, MAX_QM_ATOMS)
+            Valence charges for the QM region.
+
+        q_val_mm: torch.Tensor(N_BATCH, MAX_MM_ATOMS)
+            Valence charges for the MM region.
+
+        mesh_data: Any
+            Mesh data for the calculation.
+
+        s_qm: torch.Tensor(N_BATCH, MAX_QM_ATOMS)
+            S values for the QM region.
+
+        s_mm: torch.Tensor(N_BATCH, MAX_MM_ATOMS)
+            S values for the MM region.
+
+        target: torch.Tensor(N_BATCH,)
+            Target exchange repulsion energies in Hartree.
+        """
+        A_exrep_qm = self._nagl_model(graphs_qm)["A_exrep"].abs()
+        A_exrep_mm = self._nagl_model(graphs_mm)["A_exrep"].abs()
+        A_exrep_qm = _torch.nn.functional.pad(A_exrep_qm, (0, q_val_qm.size(1) - A_exrep_qm.size(1)))
+        A_exrep_mm = _torch.nn.functional.pad(A_exrep_mm, (0, q_val_mm.size(1) - A_exrep_mm.size(1)))
+        values = self._emle_base._get_exchange_repulsion_energy(A_exrep_qm, A_exrep_mm, q_val_qm, q_val_mm, mesh_data, s_qm, s_mm)
+        values = values * 2625.5002 # Convert from Hartree to kJ/mol
+        return (
+            self._loss(values, target),
+            self._get_rmse(values, target),
+            self._get_max_error(values, target),
+            values,
+            target,
+        )
+    
+
+class ShortRangeCorrectionLoss(_BaseLoss):
+    """
+    Loss function for the EMLENAGL model. Used to train A_sr_corr.
+
+    Parameters
+    ----------
+
+    emle_base: EMLEBase
+        EMLEBase object.
+
+    loss: torch.nn.Module, optional, default=torch.nn.MSELoss()
+        Loss function.
+
+    Attributes
+    ----------
+
+    _emle: EMLE
+        EMLE object.
+
+    _loss: torch.nn.Module
+        Loss function.
+    """
+
+    def __init__(self, emle_base, nagl_model, loss=_torch.nn.MSELoss()):
+        super().__init__()
+        from ..models._emle_base import EMLEBase
+        from ..models import NAGLEMLE
+
+        if not isinstance(emle_base, EMLEBase):
+            raise TypeError("emle_base must be an instance of EMLEBase")
+        self._emle_base = emle_base
+
+        if not isinstance(nagl_model, NAGLEMLE):
+            raise TypeError("nagl_model must be an instance of NAGLEMLE")
+        self._nagl_model = nagl_model
+
+        if not isinstance(loss, _torch.nn.Module):
+            raise TypeError("loss must be an instance of torch.nn.Module")
+        self._loss = loss
+
+    def forward(self, graphs_qm, graphs_mm, q_val_qm, q_val_mm, mesh_data, s_qm, s_mm, target, offset=None):
+        """
+        Forward pass.
+
+        Parameters
+        ----------
+        graphs_qm: Any
+            Graphs for the QM region.
+
+        graphs_mm: Any
+            Graphs for the MM region.
+
+        q_val_qm: torch.Tensor(N_BATCH, MAX_QM_ATOMS)
+            Valence charges for the QM region.
+
+        q_val_mm: torch.Tensor(N_BATCH, MAX_MM_ATOMS)
+            Valence charges for the MM region.
+
+        mesh_data: Any
+            Mesh data for the calculation.
+
+        s_qm: torch.Tensor(N_BATCH, MAX_QM_ATOMS)
+            S values for the QM region.
+
+        s_mm: torch.Tensor(N_BATCH, MAX_MM_ATOMS)
+            S values for the MM region.
+
+        target: torch.Tensor(N_BATCH,)
+            Target exchange repulsion energies in Hartree.
+        """
+        A_exrep_qm = self._nagl_model(graphs_qm)["A_sr_corr"]
+        A_exrep_mm = self._nagl_model(graphs_mm)["A_sr_corr"]
+        A_exrep_qm = _torch.nn.functional.pad(A_exrep_qm, (0, q_val_qm.size(1) - A_exrep_qm.size(1)))
+        A_exrep_mm = _torch.nn.functional.pad(A_exrep_mm, (0, q_val_mm.size(1) - A_exrep_mm.size(1)))
+        values = self._emle_base._get_short_range_corr_energy(A_exrep_qm, A_exrep_mm, q_val_qm, q_val_mm, mesh_data, s_qm, s_mm)
+        values = values * 2625.5002 # Convert from Hartree to kJ/mol
+        values = values + offset if offset is not None else values
+        return (
+            self._loss(values, target),
+            self._get_rmse(values, target),
+            self._get_max_error(values, target),
+            values,
+            target,
+        )
+    
+
+class AtomicPropertyLoss(_BaseLoss):
+    """
+    Loss function for the EMLENAGL model. Used to train s from EMLE s value.
+
+    Parameters
+    ----------
+
+    emle_base: EMLEBase
+        EMLEBase object.
+
+    loss: torch.nn.Module, optional, default=torch.nn.MSELoss()
+        Loss function.
+
+    Attributes
+    ----------
+
+    _emle: EMLE
+        EMLE object.
+
+    _loss: torch.nn.Module
+        Loss function.
+    """
+
+    def __init__(self, emle_base, nagl_model, property_label, loss=_torch.nn.MSELoss()):
+        super().__init__()
+        from ..models._emle_base import EMLEBase
+        from ..models import NAGLEMLE
+
+        if not isinstance(emle_base, EMLEBase):
+            raise TypeError("emle_base must be an instance of EMLEBase")
+        self._emle_base = emle_base
+
+        if not isinstance(nagl_model, NAGLEMLE):
+            raise TypeError("nagl_model must be an instance of NAGLEMLE")
+        self._nagl_model = nagl_model
+
+        if not isinstance(loss, _torch.nn.Module):
+            raise TypeError("loss must be an instance of torch.nn.Module")
+        self._loss = loss
+
+        self._property_label = property_label
+
+    def forward(self, graphs_qm, graphs_mm, target_qm, target_mm):
+        """
+        Forward pass.
+
+        Parameters
+        ----------
+        graphs_qm: Any
+            Graphs for the QM region.
+
+        graphs_mm: Any
+            Graphs for the MM region.
+
+        target_qm: torch.Tensor(N_BATCH, MAX_QM_ATOMS)
+            Target values for the QM region.
+
+        target_mm: torch.Tensor(N_BATCH, MAX_MM_ATOMS)
+            Target values for the MM region.
+        """
+        values_qm = self._nagl_model(graphs_qm)[self._property_label]
+        values_mm = self._nagl_model(graphs_mm)[self._property_label]
+        values_qm = _torch.nn.functional.pad(values_qm, (0, target_qm.size(1) - values_qm.size(1)))
+        values_mm = _torch.nn.functional.pad(values_mm, (0, target_mm.size(1) - values_mm.size(1)))
+        values = _torch.cat([values_qm, values_mm], dim=1)
+        target = _torch.cat([target_qm, target_mm], dim=1)
+
+        return (
+            self._loss(values, target),
+            self._get_rmse(values, target),
+            self._get_max_error(values, target),
+            values,
+            target,
+        )
+    
+
