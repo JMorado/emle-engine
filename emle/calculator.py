@@ -95,11 +95,14 @@ class EMLECalculator:
         qm_xyz_frequency=0,
         ani2x_model_index=None,
         mace_model=None,
+        nagl_model=None,
         qbc_deviation=None,
         qbc_deviation_threshold=None,
         ace_model=None,
         rascal_model=None,
         parm7=None,
+        top_file=None,
+        crd_file=None,
         qm_indices=None,
         orca_path=None,
         sqm_theory="DFTB3",
@@ -226,6 +229,11 @@ class EMLECalculator:
             on each step to qbc_deviation.
             If None, the MACE-OFF23(S) model will be used by default.
 
+        nagl_model: str
+            Path to the NAGL model file to use.
+            If passed, EMLE will additionally predict exchange-repulsion, dispersion, and
+            short-range correction energies using the NAGL model.
+
         qbc_deviation: str
             Path to a file to write the max deviation between forces predicted
             with the models (for Query-by-Committee).
@@ -257,6 +265,16 @@ class EMLECalculator:
             The path to an AMBER parm7 file for the QM region. This is needed to
             compute in vacuo MM energies for the QM region when using the Rascal
             backend, or when interpolating.
+
+        top_file: str
+            The path to an AMBER, CHARMMS or GROMACS topology file for the full
+            system. This is only needed if a NAGL model is being used.
+            This requires Sire to be installed.
+
+        crd_file: str
+            The path to an AMBER, CHARMMS or GROMACS coordinate file for the full
+            system. This is only needed if a NAGL model is being used.
+            This requires Sire to be installed.
 
         qm_indices: list, str
             A list of atom indices for the QM region. This must be specified when
@@ -459,6 +477,28 @@ class EMLECalculator:
                 raise TypeError(msg)
             self._qm_charge = qm_charge
 
+        if nagl_model is not None:
+            (
+                A_exrep_qm,
+                A_sr_corr_qm,
+                s_qm,
+                A_exrep_mm,
+                A_sr_corr_mm,
+                s_mm,
+                atomic_numbers_qm,
+                atomic_numbers_mm,
+            ) = self._get_nagl_parameters(nagl_model, top_file, crd_file, parm7)
+            nagl_params = {
+                "A_exrep_qm": A_exrep_qm,
+                "A_sr_corr_qm": A_sr_corr_qm,
+                "s_qm": s_qm,
+                "A_exrep_mm": A_exrep_mm,
+                "A_sr_corr_mm": A_sr_corr_mm,
+                "s_mm": s_mm,
+                "atomic_numbers_qm": atomic_numbers_qm,
+                "atomic_numbers_mm": atomic_numbers_mm,
+            }
+
         # Create the EMLE model instance.
         self._emle = _EMLE(
             model=model,
@@ -468,6 +508,7 @@ class EMLECalculator:
             mm_charges=self._mm_charges,
             qm_charge=self._qm_charge,
             device=self._device,
+            nagl_params=nagl_params if nagl_model is not None else None,
         )
 
         # Validate the backend(s).
@@ -1132,6 +1173,7 @@ class EMLECalculator:
         xyz_mm,
         atoms=None,
         charge=0,
+        idx_mm=None,
     ):
         """
         Calculate the energy and gradients.
@@ -1156,6 +1198,9 @@ class EMLECalculator:
 
         charge: int
             The total charge of the QM region.
+
+        idx_mm: list of int
+            Indices of MM atoms to consider for embedding.
 
         Returns
         -------
@@ -1250,6 +1295,9 @@ class EMLECalculator:
             xyz_mm, dtype=_torch.float32, device=self._device, requires_grad=True
         )
 
+        if idx_mm is not None:
+            idx_mm = _torch.tensor(idx_mm, dtype=_torch.int64, device=self._device)
+
         # Are there any MM atoms?
         allow_unused = len(charges_mm) == 0
 
@@ -1286,7 +1334,14 @@ class EMLECalculator:
         if base_model is None:
             try:
                 if len(xyz_mm) > 0:
-                    E = self._emle(atomic_numbers, charges_mm, xyz_qm, xyz_mm, charge)
+                    E = self._emle(
+                        atomic_numbers,
+                        charges_mm,
+                        xyz_qm,
+                        xyz_mm,
+                        charge,
+                        idx_mm=idx_mm,
+                    )
                     dE_dxyz_qm, dE_dxyz_mm = _torch.autograd.grad(
                         E.sum(), (xyz_qm, xyz_mm), allow_unused=allow_unused
                     )
@@ -1327,12 +1382,15 @@ class EMLECalculator:
                 _logger.error(msg)
                 raise RuntimeError(msg)
 
-            if (self._qbc_deviation):
+            if self._qbc_deviation:
                 E_std = _torch.std(base_model._E_vac_qbc).item()
                 max_f_std = _torch.max(_torch.std(base_model._grads_qbc, axis=0)).item()
                 with open(self._qbc_deviation, "a") as f:
                     f.write(f"{E_std:12.5f}{max_f_std:12.5f}\n")
-                if self._qbc_deviation_threshold and max_f_std > self._qbc_deviation_threshold:
+                if (
+                    self._qbc_deviation_threshold
+                    and max_f_std > self._qbc_deviation_threshold
+                ):
                     msg = "Force deviation threshold reached!"
                     raise ValueError(msg)
 
@@ -1482,9 +1540,7 @@ class EMLECalculator:
         force_mm: [[float, float, float]]
             The forces on the MM atoms in kJ/mol/nanometer.
         """
-
         # For performance, we assume that the input is already validated.
-
         # Convert to NumPy arrays.
         atomic_numbers = _np.array(atomic_numbers)
         charges_mm = _np.array(charges_mm)
@@ -1505,10 +1561,7 @@ class EMLECalculator:
 
         # Compute the energy and gradients.
         E_vac, grad_vac, E_tot, grad_qm, grad_mm = self._calculate_energy_and_gradients(
-            atomic_numbers,
-            charges_mm,
-            xyz_qm,
-            xyz_mm,
+            atomic_numbers, charges_mm, xyz_qm, xyz_mm, idx_mm=idx_mm
         )
 
         # Store the number of MM atoms.
@@ -1724,4 +1777,143 @@ class EMLECalculator:
             xyz_mm,
             charges_mm,
             xyz_file_qm,
+        )
+
+    @staticmethod
+    def _get_nagl_parameters(
+        nagl_model_file, topology_file, coordinate_file, qm_parm7_file
+    ):
+        """
+        Compute NAGL model parameters for a given system.
+
+        Parameters
+        ----------
+        nagl_model_file : str
+            Path to the NAGL model file.
+        topology_file : str
+            Path to the topology file (e.g., PSF or PDB).
+        coordinate_file : str
+            Path to the coordinate file (e.g., DCD or PDB).
+        qm_parm7_file : str
+            Path to the AMBER parm7 file for the QM region.
+
+        Returns
+        -------
+        A_exrep_qm : torch.Tensor(1, N_QM_ATOMS)
+            Exchange-repulsion parameter for QM atoms.
+        A_sr_corr_qm : torch.Tensor(1, N_QM_ATOMS)
+            Short-range correction parameter for QM atoms.
+        s_qm : torch.Tensor(1, N_QM_ATOMS)
+            Valence width parameter for QM atoms.
+        A_exrep_mm : torch.Tensor(1, N_QM_ATOMS + N_MM_ATOMS)
+            Exchange-repulsion parameter for MM atoms. Non-QM atoms have zero values.
+        A_sr_corr_mm : torch.Tensor(1, N_QM_ATOMS + N_MM_ATOMS)
+            Short-range correction parameter for MM atoms. Non-QM atoms have zero values.
+        s_mm : torch.Tensor(1, N_QM_ATOMS + N_MM_ATOMS)
+            Valence width parameter for MM atoms. Non-QM atoms have zero values.
+        """
+        for file_path in [
+            nagl_model_file,
+            topology_file,
+            coordinate_file,
+            qm_parm7_file,
+        ]:
+            if not _os.path.isfile(file_path):
+                raise FileNotFoundError(
+                    f"Required file for NAGL not found: {file_path}"
+                )
+        from .models import NAGLEMLE
+
+        try:
+            import sire as _sr
+        except ImportError:
+            raise ImportError("The Sire package is required for using NAGL models.")
+
+        nagl = NAGLEMLE(
+            species=[1, 6, 7, 8],
+            properties=["A_exrep", "A_sr_corr", "s"],
+            model_filepath=nagl_model_file,
+        )
+
+        system = _sr.load(topology_file, coordinate_file)
+        s_list, A_exrep_list, A_sr_corr_list, atomic_numbers_list = [], [], [], []
+        for residue in system.residues():
+            # Get atomic numbers and coordinates for the residue.
+            atomic_numbers = _torch.tensor(
+                [atom.element().num_protons() for atom in residue.atoms()],
+                dtype=_torch.int64,
+            )
+
+            xyz = _torch.tensor(
+                [
+                    [
+                        atom.coordinates().x().value(),
+                        atom.coordinates().y().value(),
+                        atom.coordinates().z().value(),
+                    ]
+                    for atom in residue.atoms()
+                ],
+                dtype=_torch.float32,
+            )
+
+            # Create the OpeNFF and NAGL molecule objects.
+            off_mol = nagl.create_openff_mol(atomic_numbers, xyz, 0)[0]
+            nagl_mol = nagl._gnn_model._convert_to_nagl_molecule(off_mol)
+
+            # Compute the NAGL properties.
+            with _torch.no_grad():
+                props = nagl(nagl_mol)
+                s_list.append(props["s"])
+                A_exrep_list.append(props["A_exrep"])
+                A_sr_corr_list.append(props["A_sr_corr"])
+
+            atomic_numbers_list.append(atomic_numbers)
+
+        s = _torch.cat(s_list, dim=1)
+        A_exrep = _torch.cat(A_exrep_list, dim=1)
+        A_sr_corr = _torch.cat(A_sr_corr_list, dim=1)
+        atomic_numbers = _torch.cat(atomic_numbers_list, dim=0).unsqueeze(0)
+
+        # Get QM and MM smarts
+        smarts = system.smarts()
+        qm_smarts = _sr.load(qm_parm7_file).smarts()
+        qm_indices = []
+        for i, smt in enumerate(smarts):
+            if smt in qm_smarts:
+                qm_indices.extend(
+                    [atom.index().value() for atom in system.residues()[i].atoms()]
+                )
+
+        # Create MM mask and separate QM and MM parameters.
+        mm_mask = _torch.ones(s.shape[1], dtype=_torch.bool)
+        mm_mask[qm_indices] = False
+
+        # Select QM parameters
+        A_exrep_qm = A_exrep[:, ~mm_mask]
+        A_sr_corr_qm = A_sr_corr[:, ~mm_mask]
+        s_qm = s[:, ~mm_mask]
+        atomic_numbers_qm = atomic_numbers[:, ~mm_mask]
+
+        # Select MM parameters (same shape as original, zero out QM atoms)
+        A_exrep_mm = A_exrep.clone()
+        A_exrep_mm[:, ~mm_mask] = 0.0
+
+        A_sr_corr_mm = A_sr_corr.clone()
+        A_sr_corr_mm[:, ~mm_mask] = 0.0
+
+        s_mm = s.clone()
+        s_mm[:, ~mm_mask] = 0.0
+
+        atomic_numbers_mm = atomic_numbers.clone()
+        atomic_numbers_mm[:, ~mm_mask] = 0
+
+        return (
+            A_exrep_qm,
+            A_sr_corr_qm,
+            s_qm,
+            A_exrep_mm,
+            A_sr_corr_mm,
+            s_mm,
+            atomic_numbers_qm,
+            atomic_numbers_mm,
         )

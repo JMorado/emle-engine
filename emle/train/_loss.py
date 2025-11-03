@@ -25,6 +25,7 @@
 import torch as _torch
 import numpy as _np
 
+
 class _BaseLoss(_torch.nn.Module):
     """
     Base class for Losses. Implements methods for error estimation
@@ -353,7 +354,9 @@ class ExchangeRepulsionLoss(_BaseLoss):
             raise TypeError("loss must be an instance of torch.nn.Module")
         self._loss = loss
 
-    def forward(self, graphs_qm, graphs_mm, q_val_qm, q_val_mm, mesh_data, s_qm, s_mm, target):
+    def forward(
+        self, graphs_qm, graphs_mm, q_val_qm, q_val_mm, mesh_data, s_qm, s_mm, target
+    ):
         """
         Forward pass.
 
@@ -385,10 +388,16 @@ class ExchangeRepulsionLoss(_BaseLoss):
         """
         A_exrep_qm = self._nagl_model(graphs_qm)["A_exrep"].abs()
         A_exrep_mm = self._nagl_model(graphs_mm)["A_exrep"].abs()
-        A_exrep_qm = _torch.nn.functional.pad(A_exrep_qm, (0, q_val_qm.size(1) - A_exrep_qm.size(1)))
-        A_exrep_mm = _torch.nn.functional.pad(A_exrep_mm, (0, q_val_mm.size(1) - A_exrep_mm.size(1)))
-        values = self._emle_base._get_exchange_repulsion_energy(A_exrep_qm, A_exrep_mm, q_val_qm, q_val_mm, mesh_data, s_qm, s_mm)
-        values = values * 2625.5002 # Convert from Hartree to kJ/mol
+        A_exrep_qm = _torch.nn.functional.pad(
+            A_exrep_qm, (0, q_val_qm.size(1) - A_exrep_qm.size(1))
+        )
+        A_exrep_mm = _torch.nn.functional.pad(
+            A_exrep_mm, (0, q_val_mm.size(1) - A_exrep_mm.size(1))
+        )
+        values = self._emle_base._get_exchange_repulsion_energy(
+            A_exrep_qm, A_exrep_mm, q_val_qm, q_val_mm, mesh_data, s_qm, s_mm
+        )
+        values = values * 2625.5002  # Convert from Hartree to kJ/mol
         return (
             self._loss(values, target),
             self._get_rmse(values, target),
@@ -396,7 +405,7 @@ class ExchangeRepulsionLoss(_BaseLoss):
             values,
             target,
         )
-    
+
 
 class ShortRangeCorrectionLoss(_BaseLoss):
     """
@@ -438,7 +447,18 @@ class ShortRangeCorrectionLoss(_BaseLoss):
             raise TypeError("loss must be an instance of torch.nn.Module")
         self._loss = loss
 
-    def forward(self, graphs_qm, graphs_mm, q_val_qm, q_val_mm, mesh_data, s_qm, s_mm, target, offset=None):
+    def forward(
+        self,
+        graphs_qm,
+        graphs_mm,
+        q_val_qm,
+        q_val_mm,
+        mesh_data,
+        s_qm,
+        s_mm,
+        target,
+        offset=None,
+    ):
         """
         Forward pass.
 
@@ -470,10 +490,16 @@ class ShortRangeCorrectionLoss(_BaseLoss):
         """
         A_exrep_qm = self._nagl_model(graphs_qm)["A_sr_corr"]
         A_exrep_mm = self._nagl_model(graphs_mm)["A_sr_corr"]
-        A_exrep_qm = _torch.nn.functional.pad(A_exrep_qm, (0, q_val_qm.size(1) - A_exrep_qm.size(1)))
-        A_exrep_mm = _torch.nn.functional.pad(A_exrep_mm, (0, q_val_mm.size(1) - A_exrep_mm.size(1)))
-        values = self._emle_base._get_short_range_corr_energy(A_exrep_qm, A_exrep_mm, q_val_qm, q_val_mm, mesh_data, s_qm, s_mm)
-        values = values * 2625.5002 # Convert from Hartree to kJ/mol
+        A_exrep_qm = _torch.nn.functional.pad(
+            A_exrep_qm, (0, q_val_qm.size(1) - A_exrep_qm.size(1))
+        )
+        A_exrep_mm = _torch.nn.functional.pad(
+            A_exrep_mm, (0, q_val_mm.size(1) - A_exrep_mm.size(1))
+        )
+        values = self._emle_base._get_short_range_corr_energy(
+            A_exrep_qm, A_exrep_mm, q_val_qm, q_val_mm, mesh_data, s_qm, s_mm
+        )
+        values = values * 2625.5002  # Convert from Hartree to kJ/mol
         values = values + offset if offset is not None else values
         return (
             self._loss(values, target),
@@ -482,7 +508,7 @@ class ShortRangeCorrectionLoss(_BaseLoss):
             values,
             target,
         )
-    
+
 
 class AtomicPropertyLoss(_BaseLoss):
     """
@@ -546,8 +572,12 @@ class AtomicPropertyLoss(_BaseLoss):
         """
         values_qm = self._nagl_model(graphs_qm)[self._property_label]
         values_mm = self._nagl_model(graphs_mm)[self._property_label]
-        values_qm = _torch.nn.functional.pad(values_qm, (0, target_qm.size(1) - values_qm.size(1)))
-        values_mm = _torch.nn.functional.pad(values_mm, (0, target_mm.size(1) - values_mm.size(1)))
+        values_qm = _torch.nn.functional.pad(
+            values_qm, (0, target_qm.size(1) - values_qm.size(1))
+        )
+        values_mm = _torch.nn.functional.pad(
+            values_mm, (0, target_mm.size(1) - values_mm.size(1))
+        )
         values = _torch.cat([values_qm, values_mm], dim=1)
         target = _torch.cat([target_qm, target_mm], dim=1)
 
@@ -558,5 +588,3 @@ class AtomicPropertyLoss(_BaseLoss):
             values,
             target,
         )
-    
-

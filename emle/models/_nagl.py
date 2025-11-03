@@ -1,5 +1,5 @@
 import torch as _torch
-from typing import Any, List, Dict, Union
+from typing import List, Dict, Union
 
 try:
     from openff.nagl.features import atoms
@@ -15,10 +15,18 @@ try:
     )
     from openff.nagl.nn import DGLMoleculeDataset, DGLMoleculeDataLoader
     from openff.toolkit import Molecule
+except ImportError:
+    raise ImportError(
+        "Failed to import NAGL modules. Ensure that the openff-nagl package is installed."
+    )
+
+try:
     from rdkit import Chem
     from rdkit.Chem import rdDetermineBonds
 except ImportError:
-    raise ImportError("Failed to import NAGL modules. Ensure that the openff-nagl package is installed.")
+    raise ImportError(
+        "Failed to import RDKit modules. Ensure that the rdkit package is installed."
+    )
 
 
 class NAGLEMLE(_torch.nn.Module):
@@ -39,17 +47,19 @@ class NAGLEMLE(_torch.nn.Module):
     n_ffnn_layers: int
         Number of feedforward layers in the GNN.
     """
+
     ALLOWED_PROPERTIES: List[str] = ["A_exrep", "A_sr_corr", "s"]
     ATOMIC_NUMBER_TO_SYMBOL: Dict[int, str] = {1: "H", 6: "C", 7: "N", 8: "O", 16: "S"}
 
-    def __init__(self, 
-                 species: List[int], 
-                 properties: List[str], 
-                 n_conv_layers: int = 3, 
-                 hidden_dim: int = 128,
-                 n_ffnn_layers: int = 4,
-                 model_filepath: str = None
-        ):
+    def __init__(
+        self,
+        species: List[int],
+        properties: List[str],
+        n_conv_layers: int = 3,
+        hidden_dim: int = 128,
+        n_ffnn_layers: int = 4,
+        model_filepath: str = None,
+    ):
         super().__init__()
 
         # check that species are a list of int
@@ -62,7 +72,7 @@ class NAGLEMLE(_torch.nn.Module):
         for name, value in {
             "n_conv_layers": n_conv_layers,
             "hidden_dim": hidden_dim,
-            "n_ffnn_layers": n_ffnn_layers
+            "n_ffnn_layers": n_ffnn_layers,
         }.items():
             if not isinstance(value, int):
                 raise TypeError(f"Expected int for {name}, got {type(value).__name__}")
@@ -76,7 +86,9 @@ class NAGLEMLE(_torch.nn.Module):
             if not isinstance(p, str):
                 raise TypeError(f"Expected str for properties element, got {type(p)}")
             if p not in self.ALLOWED_PROPERTIES:
-                raise ValueError(f"Property '{p}' is not allowed. Allowed properties are: {self.ALLOWED_PROPERTIES}")
+                raise ValueError(
+                    f"Property '{p}' is not allowed. Allowed properties are: {self.ALLOWED_PROPERTIES}"
+                )
 
         self._species = species
         self._properties = properties
@@ -89,11 +101,13 @@ class NAGLEMLE(_torch.nn.Module):
         else:
             self._gnn_model = self._build_gnn_model()
         self._dataloaders = {}
-    
+
     def _build_atom_features(self, species):
         """Build atom features for the GNN model."""
         return (
-            atoms.AtomicElement(categories=[self.ATOMIC_NUMBER_TO_SYMBOL[Z] for Z in species]),
+            atoms.AtomicElement(
+                categories=[self.ATOMIC_NUMBER_TO_SYMBOL[Z] for Z in species]
+            ),
             atoms.AtomConnectivity(),
             atoms.AtomAverageFormalCharge(),
             atoms.AtomHybridization(),
@@ -137,7 +151,7 @@ class NAGLEMLE(_torch.nn.Module):
                 layers=[readout_layer] * self._n_ffnn_layers + [output_layer],
                 postprocess=None,
             )
-            for prop in self._properties       
+            for prop in self._properties
         }
 
         config = ModelConfig(
@@ -188,14 +202,20 @@ class NAGLEMLE(_torch.nn.Module):
         for key, val in preds.items():
             preds_split = _torch.split(val, natoms_mol)
             padded_preds = _torch.nn.utils.rnn.pad_sequence(
-                preds_split,
-                batch_first=True,
-                padding_value=0.0 
+                preds_split, batch_first=True, padding_value=0.0
             ).to(val.device)
             preds[key] = padded_preds.squeeze(-1)
         return preds
 
-    def create_dataloader(self, offmols: List[Molecule], device: _torch.device, batch_size: int = 1024, mm: bool = False, *args, **kwargs) -> DGLMoleculeDataLoader:
+    def create_dataloader(
+        self,
+        offmols: List[Molecule],
+        device: _torch.device,
+        batch_size: int = 1024,
+        mm: bool = False,
+        *args,
+        **kwargs,
+    ) -> DGLMoleculeDataLoader:
         """
         Create a DGL data loader for the given OpenFF molecules. Required for batched inference.
 
@@ -219,13 +239,21 @@ class NAGLEMLE(_torch.nn.Module):
             A data loader for the specified molecules.
         """
         key = "mm" if mm else "qm"
-        dataset = DGLMoleculeDataset.from_openff(offmols, atom_features=self._atom_features)
-        dataloader = DGLMoleculeDataLoader(dataset, batch_size=batch_size, *args, **kwargs)
+        dataset = DGLMoleculeDataset.from_openff(
+            offmols, atom_features=self._atom_features
+        )
+        dataloader = DGLMoleculeDataLoader(
+            dataset, batch_size=batch_size, *args, **kwargs
+        )
         self._dataloaders[key] = dataloader
         return dataloader
-        
+
     @staticmethod
-    def create_openff_mol(atomic_numbers: _torch.Tensor, xyz: _torch.Tensor, charge: Union[_torch.Tensor, int]):
+    def create_openff_mol(
+        atomic_numbers: _torch.Tensor,
+        xyz: _torch.Tensor,
+        charge: Union[_torch.Tensor, int],
+    ):
         """
         Create OpenFF Molecule instances from atomic numbers, coordinates, and charge.
 
@@ -250,7 +278,10 @@ class NAGLEMLE(_torch.nn.Module):
             if isinstance(charge, _torch.Tensor):
                 charge = charge.unsqueeze(0)
             else:
-                charge = _torch.ones((xyz.size(0),), dtype=xyz.dtype, device=xyz.device) * charge
+                charge = (
+                    _torch.ones((xyz.size(0),), dtype=xyz.dtype, device=xyz.device)
+                    * charge
+                )
 
         atomic_numbers = atomic_numbers.detach().cpu().numpy()
         xyz = xyz.detach().cpu().numpy()
