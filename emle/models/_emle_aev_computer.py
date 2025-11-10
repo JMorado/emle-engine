@@ -234,8 +234,8 @@ class EMLEAEVComputer(_torch.nn.Module):
             aev = self._aev
 
         norm = _torch.linalg.norm(aev, dim=2, keepdim=True)
-        safe_norm = _torch.where(norm > 1e-16, norm, 1)
-        aev = self._apply_mask(_torch.where(zid[:, :, None] > -1, aev / safe_norm, 0.0))
+
+        aev = self._apply_mask(_torch.where(zid[:, :, None] > -1, aev / norm, 0.0))
 
         return aev
 

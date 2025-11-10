@@ -478,26 +478,9 @@ class EMLECalculator:
             self._qm_charge = qm_charge
 
         if nagl_model is not None:
-            (
-                A_exrep_qm,
-                A_sr_corr_qm,
-                s_qm,
-                A_exrep_mm,
-                A_sr_corr_mm,
-                s_mm,
-                atomic_numbers_qm,
-                atomic_numbers_mm,
-            ) = self._get_nagl_parameters(nagl_model, top_file, crd_file, parm7)
-            nagl_params = {
-                "A_exrep_qm": A_exrep_qm,
-                "A_sr_corr_qm": A_sr_corr_qm,
-                "s_qm": s_qm,
-                "A_exrep_mm": A_exrep_mm,
-                "A_sr_corr_mm": A_sr_corr_mm,
-                "s_mm": s_mm,
-                "atomic_numbers_qm": atomic_numbers_qm,
-                "atomic_numbers_mm": atomic_numbers_mm,
-            }
+            nagl_params = self._get_nagl_parameters(
+                nagl_model, top_file, crd_file, parm7
+            )
 
         # Create the EMLE model instance.
         self._emle = _EMLE(
@@ -1537,8 +1520,11 @@ class EMLECalculator:
         force_qm: [[float, float, float]]
             The forces on the QM atoms in kJ/mol/nanometer.
 
-        force_mm: [[float, float, float]]
+        force_mm: [[float, float, float]] Tuple[_torch.Tensor, _torch.Tensor]:
             The forces on the MM atoms in kJ/mol/nanometer.
+                        else:
+                            delta_model = backend
+                    # This is a non-Torch backend.
         """
         # For performance, we assume that the input is already validated.
         # Convert to NumPy arrays.
@@ -1799,18 +1785,22 @@ class EMLECalculator:
 
         Returns
         -------
-        A_exrep_qm : torch.Tensor(1, N_QM_ATOMS)
-            Exchange-repulsion parameter for QM atoms.
-        A_sr_corr_qm : torch.Tensor(1, N_QM_ATOMS)
-            Short-range correction parameter for QM atoms.
-        s_qm : torch.Tensor(1, N_QM_ATOMS)
-            Valence width parameter for QM atoms.
-        A_exrep_mm : torch.Tensor(1, N_QM_ATOMS + N_MM_ATOMS)
-            Exchange-repulsion parameter for MM atoms. Non-QM atoms have zero values.
-        A_sr_corr_mm : torch.Tensor(1, N_QM_ATOMS + N_MM_ATOMS)
-            Short-range correction parameter for MM atoms. Non-QM atoms have zero values.
-        s_mm : torch.Tensor(1, N_QM_ATOMS + N_MM_ATOMS)
-            Valence width parameter for MM atoms. Non-QM atoms have zero values.
+        nagl_params_dict : dict
+            A dictionary containing NAGL parameters for QM and MM regions:
+            {
+                'A_exrep_qm': Tensor,
+                'A_exrep_mm': Tensor,
+                'A_sr_corr_qm': Tensor,
+                'A_sr_corr_mm': Tensor,
+                's_qm': Tensor,
+                's_mm': Tensor,
+                'atomic_numbers_qm': Tensor,
+                'atomic_numbers_mm': Tensor,
+                'lj_sigma_qm': Tensor,
+                'lj_sigma_mm': Tensor,
+                'lj_eps_qm': Tensor,
+                'lj_eps_mm': Tensor,
+            }
         """
         for file_path in [
             nagl_model_file,
@@ -1836,7 +1826,14 @@ class EMLECalculator:
         )
 
         system = _sr.load(topology_file, coordinate_file)
-        s_list, A_exrep_list, A_sr_corr_list, atomic_numbers_list = [], [], [], []
+        (
+            s_list,
+            A_exrep_list,
+            A_sr_corr_list,
+            atomic_numbers_list,
+            lj_sigma_list,
+            lj_eps_list,
+        ) = ([], [], [], [], [], [])
         for residue in system.residues():
             # Get atomic numbers and coordinates for the residue.
             atomic_numbers = _torch.tensor(
@@ -1844,6 +1841,24 @@ class EMLECalculator:
                 dtype=_torch.int64,
             )
 
+            # Get the sigma and epsilon values.
+            lj_sigma = _torch.tensor(
+                [
+                    atom.lj().sigma().to("A") / _BOHR_TO_ANGSTROM
+                    for atom in residue.atoms()
+                ],
+                dtype=_torch.float64,
+            )
+
+            lj_eps = _torch.tensor(
+                [
+                    atom.lj().epsilon().to("kJ mol^-1") / _HARTREE_TO_KJ_MOL
+                    for atom in residue.atoms()
+                ],
+                dtype=_torch.float64,
+            )
+
+            # Get the coordinates.
             xyz = _torch.tensor(
                 [
                     [
@@ -1863,16 +1878,23 @@ class EMLECalculator:
             # Compute the NAGL properties.
             with _torch.no_grad():
                 props = nagl(nagl_mol)
+                #s_list.append(props["s"])
+                #A_exrep_list.append(props["A_exrep"])
+                #A_sr_corr_list.append(props["A_sr_corr"])
                 s_list.append(props["s"])
                 A_exrep_list.append(props["A_exrep"])
                 A_sr_corr_list.append(props["A_sr_corr"])
 
             atomic_numbers_list.append(atomic_numbers)
+            lj_sigma_list.append(lj_sigma)
+            lj_eps_list.append(lj_eps)
 
         s = _torch.cat(s_list, dim=1)
         A_exrep = _torch.cat(A_exrep_list, dim=1)
         A_sr_corr = _torch.cat(A_sr_corr_list, dim=1)
         atomic_numbers = _torch.cat(atomic_numbers_list, dim=0).unsqueeze(0)
+        lj_sigma = _torch.cat(lj_sigma_list, dim=0).unsqueeze(0)
+        lj_eps = _torch.cat(lj_eps_list, dim=0).unsqueeze(0)
 
         # Get QM and MM smarts
         smarts = system.smarts()
@@ -1893,27 +1915,36 @@ class EMLECalculator:
         A_sr_corr_qm = A_sr_corr[:, ~mm_mask]
         s_qm = s[:, ~mm_mask]
         atomic_numbers_qm = atomic_numbers[:, ~mm_mask]
+        lj_sigma_qm = lj_sigma[:, ~mm_mask]
+        lj_eps_qm = lj_eps[:, ~mm_mask]
 
         # Select MM parameters (same shape as original, zero out QM atoms)
         A_exrep_mm = A_exrep.clone()
         A_exrep_mm[:, ~mm_mask] = 0.0
-
         A_sr_corr_mm = A_sr_corr.clone()
         A_sr_corr_mm[:, ~mm_mask] = 0.0
-
         s_mm = s.clone()
         s_mm[:, ~mm_mask] = 0.0
-
         atomic_numbers_mm = atomic_numbers.clone()
         atomic_numbers_mm[:, ~mm_mask] = 0
+        lj_sigma_mm = lj_sigma.clone()
+        lj_sigma_mm[:, ~mm_mask] = 0.0
+        lj_eps_mm = lj_eps.clone()
+        lj_eps_mm[:, ~mm_mask] = 0.0
 
-        return (
-            A_exrep_qm,
-            A_sr_corr_qm,
-            s_qm,
-            A_exrep_mm,
-            A_sr_corr_mm,
-            s_mm,
-            atomic_numbers_qm,
-            atomic_numbers_mm,
-        )
+        nagl_params_dict = {
+            "A_exrep_qm": A_exrep_qm,
+            "A_sr_corr_qm": A_sr_corr_qm,
+            "s_qm": s_qm,
+            "A_exrep_mm": A_exrep_mm,
+            "A_sr_corr_mm": A_sr_corr_mm,
+            "s_mm": s_mm,
+            "atomic_numbers_qm": atomic_numbers_qm,
+            "atomic_numbers_mm": atomic_numbers_mm,
+            "lj_sigma_qm": lj_sigma_qm,
+            "lj_eps_qm": lj_eps_qm,
+            "lj_sigma_mm": lj_sigma_mm,
+            "lj_eps_mm": lj_eps_mm,
+        }
+
+        return nagl_params_dict

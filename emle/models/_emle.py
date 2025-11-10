@@ -92,6 +92,7 @@ class EMLE(_torch.nn.Module):
         dtype=None,
         create_aev_calculator=True,
         nagl_params: dict = None,
+        dispersion_mode: str = "c6",
     ):
         """
         Constructor.
@@ -119,7 +120,7 @@ class EMLE(_torch.nn.Module):
                     region.
 
         alpha_mode: str
-            How atomic polarizabilities are calculated.
+            How atomic polarizabilities are calculated.dispersion
                 "species":
                     one volume scaling factor is used for each species
                 "reference":
@@ -178,6 +179,15 @@ class EMLE(_torch.nn.Module):
                 's_mm': torch.Tensor
             These parameters can be precomputed using the NAGL model to avoid
             redundant calculations during the forward pass.
+
+        disp_mode: str
+            The dispersion interaction mode to use. Options are:
+                "lj":
+                    Lennard-Jones 12-6 potential.
+                "c6":
+                    C6/R^6 dispersion potential with Tang-Toennies damping.
+                None
+                    No dispersion interactions are computed.
         """
 
         # Call the base class constructor.
@@ -208,6 +218,14 @@ class EMLE(_torch.nn.Module):
         if alpha_mode not in ["species", "reference"]:
             raise ValueError("'alpha_mode' must be 'species' or 'reference'")
         self._alpha_mode = alpha_mode
+
+        if dispersion_mode:
+            if not isinstance(dispersion_mode, str):
+                raise TypeError("'dispersion_mode' must be of type 'str'")
+            dispersion_mode = dispersion_mode.lower().replace(" ", "")
+            if dispersion_mode not in ["lj", "c6"]:
+                raise ValueError("'dispersion_mode' must be 'lj' or 'c6'")
+        self._dispersion_mode = dispersion_mode
 
         if atomic_numbers is not None:
             if isinstance(atomic_numbers, (_np.ndarray, _torch.Tensor)):
@@ -302,11 +320,19 @@ class EMLE(_torch.nn.Module):
                 params["chi_ref"], dtype=dtype, device=device
             ),
             "k_Z": _torch.tensor(params["k_Z"], dtype=dtype, device=device),
+            "c6_Z": (
+                _torch.tensor(params["c6_Z"], dtype=dtype, device=device)
+                if "c6_Z" in params
+                else None
+            ),
             "sqrtk_ref": (
                 _torch.tensor(params["sqrtk_ref"], dtype=dtype, device=device)
                 if "sqrtk_ref" in params
                 else None
             ),
+            "ref_values_c6": _torch.tensor(
+                params["c6_ref"], dtype=dtype, device=device
+            ) if "c6_ref" in params else None,
         }
 
         if method == "mm":
@@ -522,18 +548,22 @@ class EMLE(_torch.nn.Module):
         if idx_mm is not None:
             if isinstance(idx_mm, (_np.ndarray, list, tuple)):
                 idx_mm = _torch.tensor(idx_mm, dtype=_torch.int64, device=self._device)
-            n_mm_atoms = len(idx_mm)
-            self._charges_mm = self._charges_mm[:, :n_mm_atoms]
-            self._xyz_mm = self._xyz_mm[:, :n_mm_atoms, :]
+            if idx_mm.ndim == 1:
+                idx_mm = idx_mm.repeat(batch_size, 1)
+            mask_mm = idx_mm > 0
+            max_n_mm_atoms = mask_mm.sum(dim=1).max()
+            self._charges_mm = self._charges_mm[:, :max_n_mm_atoms]
+            self._xyz_mm = self._xyz_mm[:, :max_n_mm_atoms, :]
 
         # Get the parameters from the base model:
         #    valence widths, core charges, valence charges, A_thole tensor
         # These are returned as batched tensors, so we need to extract the
         # first element of each.
-        s, q_core, q_val, A_thole = self._emle_base(
+        s, q_core, q_val, A_thole, c6 = self._emle_base(
             self._atomic_numbers,
             self._xyz_qm,
             qm_charge,
+            calc_c6=True if self._dispersion_mode else False,
         )
 
         # Convert coordinates to Bohr.
@@ -563,23 +593,15 @@ class EMLE(_torch.nn.Module):
             and self._method in ["electrostatic", "nonpol"]
         ):
             # Compute exchange-repulsion energy.
-            q_core_mm = (
-                self._emle_base._q_core_mm[:, idx_mm]
-                if idx_mm is not None
-                else self._emle_base._q_core_mm
-            )
+            q_core_mm = self._emle_base._q_core_mm.expand(batch_size, -1)
+            A_exrep_qm = self._emle_base._A_exrep_qm.expand(batch_size, -1)
+            A_exrep_mm = self._emle_base._A_exrep_mm.expand(batch_size, -1)
+            s_mm = self._emle_base._s_mm.expand(batch_size, -1)
+            if idx_mm is not None:
+                q_core_mm = q_core_mm.gather(1, idx_mm)
+                A_exrep_mm = A_exrep_mm.gather(1, idx_mm)
+                s_mm = s_mm.gather(1, idx_mm)
             q_val_mm = self._charges_mm - q_core_mm
-            A_exrep_qm = self._emle_base._A_exrep_qm
-            A_exrep_mm = (
-                self._emle_base._A_exrep_mm[:, idx_mm]
-                if idx_mm is not None
-                else self._emle_base._A_exrep_mm
-            )
-            s_mm = (
-                self._emle_base._s_mm[:, idx_mm]
-                if idx_mm is not None
-                else self._emle_base._s_mm
-            )
             E_exrep = self._emle_base.get_exchange_repulsion_energy(
                 A_exrep_qm, A_exrep_mm, q_val, q_val_mm, mesh_data, s, s_mm
             )
@@ -599,12 +621,10 @@ class EMLE(_torch.nn.Module):
             and self._method in ["electrostatic", "nonpol"]
         ):
             # Compute short-range correction energy.
-            A_sr_corr_qm = self._emle_base._A_sr_corr_qm
-            A_sr_corr_mm = (
-                self._emle_base._A_sr_corr_mm[:, idx_mm]
-                if idx_mm is not None
-                else self._emle_base._A_sr_corr_mm
-            )
+            A_sr_corr_qm = self._emle_base._A_sr_corr_qm.expand(batch_size, -1)
+            A_sr_corr_mm = self._emle_base._A_sr_corr_mm.expand(batch_size, -1)
+            if idx_mm is not None:
+                A_sr_corr_mm = A_sr_corr_mm.gather(1, idx_mm)
             E_short_range_corr = self._emle_base.get_sr_corr_energy(
                 A_sr_corr_qm, A_sr_corr_mm, q_val, q_val_mm, mesh_data, s, s_mm
             )
@@ -613,6 +633,7 @@ class EMLE(_torch.nn.Module):
                 batch_size, dtype=self._xyz_qm.dtype, device=self._xyz_qm.device
             )
 
+        # Compute the static energy
         if self._method == "mm":
             q_core = self._q_core_mm.expand(batch_size, -1)
             q_val = _torch.zeros_like(
@@ -633,13 +654,44 @@ class EMLE(_torch.nn.Module):
                 E_static, dtype=self._charges_mm.dtype, device=self._device
             )
 
+        # Compute the dispersion or LJ energy.
+        if self._method in ["electrostatic", "nonpol"] and self._dispersion_mode:
+            sigma_mm = self._emle_base._lj_sigma_mm.expand(batch_size, -1)
+            epsilon_mm = self._emle_base._lj_eps_mm.expand(batch_size, -1)
+            if idx_mm is not None:
+                sigma_mm = sigma_mm.gather(1, idx_mm)
+                epsilon_mm = epsilon_mm.gather(1, idx_mm)
+            alpha_qm = self._emle_base.get_isotropic_polarizabilities(A_thole)
+            if self._dispersion_mode == "lj":
+                sigma_qm, epsilon_qm = self._emle_base.get_lj_parameters(c6, alpha_qm)
+                E_disp = self._emle_base.get_lj_energy(
+                    sigma_qm,
+                    epsilon_qm,
+                    sigma_mm,
+                    epsilon_mm,
+                    mesh_data,
+                )
+            elif self._dispersion_mode == "c6":
+                c6_mm = 4 * epsilon_mm * sigma_mm**6
+                c6_qm = c6 * alpha_qm * 0.5
+                E_disp = self._emle_base.get_dispersion_energy(
+                    c6_qm, c6_mm, s, s_mm, mesh_data, tang_toennies=True
+                )
+        else:
+            E_disp = _torch.zeros_like(
+                E_static, dtype=self._charges_mm.dtype, device=self._device
+            )
+
         if self._method == "electrostatic":
             HARTREE_TO_KCALMOL = 627.5094740631
             print(
                 f"EMLE static: {E_static.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
                 f"induced: {E_ind.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
                 f"exrep: {E_exrep.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
-                f"short-range corr: {E_short_range_corr.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol"
+                f"short-range corr: {E_short_range_corr.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                f"dispersion: {E_disp.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol"
             )
 
-        return _torch.stack((E_static, E_ind, E_exrep, E_short_range_corr), dim=0)
+        return _torch.stack(
+            (E_static, E_ind, E_exrep, E_short_range_corr, E_disp), dim=0
+        )

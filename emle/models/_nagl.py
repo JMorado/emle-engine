@@ -59,6 +59,7 @@ class NAGLEMLE(_torch.nn.Module):
         hidden_dim: int = 128,
         n_ffnn_layers: int = 4,
         model_filepath: str = None,
+        joint_decoder: bool = False
     ):
         super().__init__()
 
@@ -91,6 +92,7 @@ class NAGLEMLE(_torch.nn.Module):
                 )
 
         self._species = species
+        self._joint_decoder = joint_decoder
         self._properties = properties
         self._hidden_dim = hidden_dim
         self._n_conv_layers = n_conv_layers
@@ -99,7 +101,7 @@ class NAGLEMLE(_torch.nn.Module):
         if model_filepath is not None:
             self.load(model_filepath)
         else:
-            self._gnn_model = self._build_gnn_model()
+            self._gnn_model = self._build_gnn_model(joint_decoder=joint_decoder)
         self._dataloaders = {}
 
     def _build_atom_features(self, species):
@@ -117,7 +119,7 @@ class NAGLEMLE(_torch.nn.Module):
             atoms.AtomInRingOfSize(ring_size=6),
         )
 
-    def _build_gnn_model(self):
+    def _build_gnn_model(self, joint_decoder: bool = False) -> GNNModel:
         """Helper function to build the GNN model."""
         # Convolution module (aggregator)
         conv_layer = ConvolutionLayer(
@@ -138,21 +140,48 @@ class NAGLEMLE(_torch.nn.Module):
             dropout=0.0,
         )
 
-        # Build the readout layers for each property
-        output_layer = ForwardLayer(
-            hidden_feature_size=1,
-            activation_function="Identity",
-            dropout=0.0,
-        )
-
-        readouts = {
-            prop: ReadoutModule(
-                pooling="atoms",
-                layers=[readout_layer] * self._n_ffnn_layers + [output_layer],
-                postprocess=None,
+        if joint_decoder:
+            # Single multi-output readout layer that jointly predicts all properties
+            output_layer = ForwardLayer(
+                hidden_feature_size=len(self._properties) - 1,
+                activation_function="Identity",
+                dropout=0.0,
             )
-            for prop in self._properties
-        }
+
+            output_layer_s = ForwardLayer(
+                hidden_feature_size=1,
+                activation_function="Identity",
+                dropout=0.0,
+            )
+
+            readouts = {
+                "joint": ReadoutModule(
+                    pooling="atoms",
+                    layers=[readout_layer] * self._n_ffnn_layers + [output_layer],
+                    postprocess=None,
+                ),
+                "s": ReadoutModule(
+                    pooling="atoms",
+                    layers=[readout_layer] * self._n_ffnn_layers + [output_layer_s],
+                    postprocess=None,
+                )   
+            }
+        else:
+            # Property-specific readout layers (multiple single-output readouts)
+            output_layer = ForwardLayer(
+                hidden_feature_size=1,
+                activation_function="Identity",
+                dropout=0.0,
+            )
+
+            readouts = {
+                prop: ReadoutModule(
+                    pooling="atoms",
+                    layers=[readout_layer] * self._n_ffnn_layers + [output_layer],
+                    postprocess=None,
+                )
+                for prop in self._properties
+            }
 
         config = ModelConfig(
             version="0.1",
@@ -299,10 +328,14 @@ class NAGLEMLE(_torch.nn.Module):
             ]
             xyz_block = f"{len(z_valid)}\n\n" + "\n".join(xyz_lines)
 
+ 
             mol = Chem.MolFromXYZBlock(xyz_block)
             if mol is None:
                 raise ValueError("Failed to create RDKit molecule from XYZ block")
-            rdDetermineBonds.DetermineBonds(mol, charge=int(q))
+            try:
+                rdDetermineBonds.DetermineBonds(mol, charge=int(q))
+            except Exception as e:
+                print("Warning: RDKit failed to determine bonds:", e)
             off_mols.append(Molecule.from_rdkit(mol))
 
         return off_mols
