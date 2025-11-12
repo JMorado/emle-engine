@@ -116,6 +116,10 @@ class EMLECalculator:
         log_level="ERROR",
         log_file=None,
         save_settings=False,
+        emle_plus_cp=False,
+        emle_plus_exrep=False,
+        emle_plus_sr_corr=False,
+        emle_plus_dispersion=None,
     ):
         """
         Constructor
@@ -492,6 +496,10 @@ class EMLECalculator:
             qm_charge=self._qm_charge,
             device=self._device,
             nagl_params=nagl_params if nagl_model is not None else None,
+            emle_plus_cp=emle_plus_cp,
+            emle_plus_exrep=emle_plus_exrep,
+            emle_plus_sr_corr=emle_plus_sr_corr,
+            dispersion_mode=emle_plus_dispersion,
         )
 
         # Validate the backend(s).
