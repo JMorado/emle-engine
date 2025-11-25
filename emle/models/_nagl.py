@@ -59,7 +59,7 @@ class NAGLEMLE(_torch.nn.Module):
         hidden_dim: int = 128,
         n_ffnn_layers: int = 4,
         model_filepath: str = None,
-        joint_decoder: bool = False
+        joint_decoder: bool = False,
     ):
         super().__init__()
 
@@ -165,7 +165,7 @@ class NAGLEMLE(_torch.nn.Module):
                     pooling="atoms",
                     layers=[readout_layer] * self._n_ffnn_layers + [output_layer_s],
                     postprocess=None,
-                )   
+                ),
             }
         else:
             # Property-specific readout layers (multiple single-output readouts)
@@ -329,7 +329,6 @@ class NAGLEMLE(_torch.nn.Module):
             ]
             xyz_block = f"{len(z_valid)}\n\n" + "\n".join(xyz_lines)
 
- 
             mol = Chem.MolFromXYZBlock(xyz_block)
             if mol is None:
                 raise ValueError("Failed to create RDKit molecule from XYZ block")

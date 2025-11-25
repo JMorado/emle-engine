@@ -116,10 +116,10 @@ class EMLECalculator:
         log_level="ERROR",
         log_file=None,
         save_settings=False,
-        emle_plus_cp=False,
-        emle_plus_exrep=False,
-        emle_plus_sr_corr=False,
-        emle_plus_dispersion=None,
+        cp_mode=None,
+        include_exrep=False,
+        include_sr_corr=False,
+        dispersion_mode=None,
     ):
         """
         Constructor
@@ -340,6 +340,30 @@ class EMLECalculator:
         save_settings: bool
             Whether to write a YAML file containing the settings used to initialise
             the calculator.
+
+        cp_mode: str
+            Charge penetration mode:
+                "gaussian":
+                    Use Gaussian charge distributions for charge penetration.
+                "slater":
+                    Use Slater valence shells + point core charges for charge penetration.
+                None:
+                    No charge penetration interactions are computed.
+
+        include_exrep: bool
+            Whether to include the exchange-repulsion interaction.
+
+        include_sr_corr: bool
+            Whether to include the short-range correction interaction.
+
+        dispersion_mode: str
+            The dispersion interaction mode to use. Options are:
+                "lj":
+                    Lennard-Jones 12-6 potential.
+                "c6":
+                    C6/R^6 dispersion potential with Tang-Toennies damping.
+                None:
+                    No dispersion interactions are computed.
         """
 
         from ._resources import _fetch_resources
@@ -496,10 +520,10 @@ class EMLECalculator:
             qm_charge=self._qm_charge,
             device=self._device,
             nagl_params=nagl_params if nagl_model is not None else None,
-            emle_plus_cp=emle_plus_cp,
-            emle_plus_exrep=emle_plus_exrep,
-            emle_plus_sr_corr=emle_plus_sr_corr,
-            dispersion_mode=emle_plus_dispersion,
+            cp_mode=cp_mode,
+            include_exrep=include_exrep,
+            include_sr_corr=include_sr_corr,
+            dispersion_mode=dispersion_mode,
         )
 
         # Validate the backend(s).
@@ -1810,16 +1834,15 @@ class EMLECalculator:
                 'lj_eps_mm': Tensor,
             }
         """
-        for file_path in [
-            nagl_model_file,
-            topology_file,
-            coordinate_file,
-            qm_parm7_file,
+        for var, name in [
+            (nagl_model_file, "NAGL model file"),
+            (topology_file, "Topology file of the entire system"),
+            (coordinate_file, "Coordinate file of the entire system"),
+            (qm_parm7_file, "QM parm7 file"),
         ]:
-            if not _os.path.isfile(file_path):
-                raise FileNotFoundError(
-                    f"Required file for NAGL not found: {file_path}"
-                )
+            assert var is not None, f"{name} is None. This is required for NAGL."
+            assert _os.path.isfile(var), f"{name} not found: {var}"
+
         from .models import NAGLEMLE
 
         try:

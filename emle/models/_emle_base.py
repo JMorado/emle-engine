@@ -32,7 +32,7 @@ import numpy as _np
 import torch as _torch
 
 from torch import Tensor
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torchani as _torchani
 
@@ -194,13 +194,21 @@ class EMLEBase(_torch.nn.Module):
         # Store model parameters as tensors.
         self.a_QEq = _torch.nn.Parameter(params["a_QEq"])
         self.a_Thole = _torch.nn.Parameter(params["a_Thole"])
+        # self.a_Gauss = (
+        #    _torch.nn.Parameter(params["a_Gauss"]) if "a_Gauss" in params else None
+        # )
+        self.a_Gauss = _torch.nn.Parameter(params["a_QEq"])
         self.ref_values_s = _torch.nn.Parameter(params["ref_values_s"])
         self.ref_values_chi = _torch.nn.Parameter(params["ref_values_chi"])
         self.k_Z = _torch.nn.Parameter(params["k_Z"])
-        
+
         # Register c6_Z if provided
         if "c6_Z" in params:
-            self.c6_Z = _torch.nn.Parameter(params["c6_Z"]) if params["c6_Z"] is not None else None
+            self.c6_Z = (
+                _torch.nn.Parameter(params["c6_Z"])
+                if params["c6_Z"] is not None
+                else None
+            )
         else:
             self.c6_Z = None
 
@@ -215,7 +223,11 @@ class EMLEBase(_torch.nn.Module):
                 raise ValueError(msg)
 
         if "ref_values_c6" in params:
-            self.ref_values_c6 = _torch.nn.Parameter(params["ref_values_c6"]) if params["ref_values_c6"] is not None else None
+            self.ref_values_c6 = (
+                _torch.nn.Parameter(params["ref_values_c6"])
+                if params["ref_values_c6"] is not None
+                else None
+            )
         else:
             self.ref_values_c6 = None
 
@@ -278,9 +290,6 @@ class EMLEBase(_torch.nn.Module):
         self.register_buffer("_c_chi", c_chi)
         self.register_buffer("_c_sqrtk", c_sqrtk)
         self.register_buffer("_c_c6", c_c6)
-        
-        # Exponential coeff for exchange-repulsion and short-range correction
-        self._gamma_exrep = _torch.nn.Parameter(_torch.tensor(params.get("gamma_exrep", 1.0), dtype=dtype, device=device))
 
         # Register NAGL parameters if provided.
         for nagl_param in [
@@ -476,9 +485,213 @@ class EMLEBase(_torch.nn.Module):
         self._q_core_mm = self._q_core_mm.float()
         return self
 
+    def get_aev_data(self, atomic_numbers, xyz_qm):
+        """
+        Compute AEV features and species mapping.
+
+        Parameters
+        ----------
+
+        atomic_numbers: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Atomic numbers of QM atoms.
+
+        xyz_qm: torch.Tensor (N_BATCH, N_QM_ATOMS, 3)
+            Positions of QM atoms in Angstrom.
+
+        Returns
+        -------
+
+        mask: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Mask for padded coordinates.
+
+        species_id: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Species IDs mapped from atomic numbers.
+
+        aev: torch.Tensor (N_BATCH, N_QM_ATOMS, N_AEV)
+            Atomic environment vectors.
+        """
+        mask = atomic_numbers > 0
+        species_id = self._species_map[atomic_numbers]
+        aev = self._emle_aev_computer(species_id, xyz_qm)
+        return mask, species_id, aev
+
+    def get_s(self, aev, species_id):
+        """
+        Compute MBIS valence shell widths using GPR.
+
+        Parameters
+        ----------
+
+        aev: torch.Tensor (N_BATCH, N_QM_ATOMS, N_AEV)
+            Atomic environment vectors.
+
+        species_id: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Species IDs.
+
+        Returns
+        -------
+
+        s: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            MBIS valence shell widths.
+        """
+        s, var = self._gpr(
+            aev, self._ref_mean_s, self._c_s, species_id, return_var=True
+        )
+        # TODO: DELETE THIS LATER
+        var_row = var.detach().cpu().numpy()
+        return s
+
+    def get_chi(self, aev, species_id):
+        """
+        Compute electronegativities using GPR.
+
+        Parameters
+        ----------
+
+        aev: torch.Tensor (N_BATCH, N_QM_ATOMS, N_AEV)
+            Atomic environment vectors.
+
+        species_id: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Species IDs.
+
+        Returns
+        -------
+
+        chi: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Electronegativities.
+        """
+        return self._gpr(aev, self._ref_mean_chi, self._c_chi, species_id)
+
+    def get_q_core(self, species_id, mask):
+        """
+        Get core charges for atoms.
+
+        Parameters
+        ----------
+
+        species_id: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Species IDs.
+
+        mask: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Mask for valid atoms.
+
+        Returns
+        -------
+
+        q_core: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Core charges.
+        """
+        return self._q_core[species_id] * mask
+
+    def get_q_val(self, s, chi, q_total, r_data, mask):
+        """
+        Compute valence charges using QEq.
+
+        Parameters
+        ----------
+
+        s: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            MBIS valence shell widths.
+
+        chi: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Electronegativities.
+
+        q_total: torch.Tensor (N_BATCH,)
+            Total charge.
+
+        r_data: r_data object
+            Pre-computed r_data from _get_r_data.
+
+        mask: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Mask for valid atoms.
+
+        Returns
+        -------
+
+        q_val: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Valence charges.
+        """
+        q = self._get_q(r_data, s, chi, q_total, mask)
+        return q
+
+    def get_A_thole(self, xyz_qm, s, q_val, species_id, aev, mask, r_data):
+        """
+        Compute Thole A matrix for induced dipoles.
+
+        Parameters
+        ----------
+
+        xyz_qm: torch.Tensor (N_BATCH, N_QM_ATOMS, 3)
+            Positions of QM atoms in Angstrom.
+
+        s: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            MBIS valence shell widths.
+
+        q_val: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Valence charges.
+
+        species_id: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Species IDs.
+
+        aev: torch.Tensor (N_BATCH, N_QM_ATOMS, N_AEV)
+            Atomic environment vectors.
+
+        mask: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Mask for valid atoms.
+
+        r_data: r_data object
+            Pre-computed r_data from _get_r_data.
+
+        Returns
+        -------
+
+        A_thole: torch.Tensor (N_BATCH, N_QM_ATOMS * 3, N_QM_ATOMS * 3)
+            Thole A matrix.
+        """
+        k = self.k_Z[species_id] * mask
+        if self._alpha_mode == "reference":
+            k_scale = (
+                self._gpr(aev, self._ref_mean_sqrtk, self._c_sqrtk, species_id) ** 2
+            )
+            k = k_scale * k
+
+        return self._get_A_thole(r_data, s, q_val, k, self.a_Thole)
+
+    def get_c6(self, species_id, aev, mask):
+        """
+        Compute C6 dispersion coefficients using GPR.
+
+        Parameters
+        ----------
+
+        species_id: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Species IDs.
+
+        aev: torch.Tensor (N_BATCH, N_QM_ATOMS, N_AEV)
+            Atomic environment vectors.
+
+        mask: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Mask for valid atoms.
+
+        Returns
+        -------
+
+        c6: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            C6 dispersion coefficients.
+        """
+        if self.c6_Z is None:
+            return None
+
+        c6 = self.c6_Z[species_id] * mask
+        c6_scale = self._gpr(aev, self._ref_mean_c6, self._c_c6, species_id) ** 2
+        return c6_scale * c6
+
     def forward(self, atomic_numbers, xyz_qm, q_total, calc_c6=False):
         """
-        Compute the valence widths, core charges, valence charges, A_thole tensor, and optionally short-range correction parameters.
+        Compute the valence widths, core charges, valence charges, A_thole tensor, and optionally C6 coefficients.
+
+        This is a convenience method that calls the individual getter methods.
+        For more control, use the individual methods directly.
 
         Parameters
         ----------
@@ -502,62 +715,22 @@ class EMLEBase(_torch.nn.Module):
                  torch.Tensor (N_BATCH, N_QM_ATOMS,),
                  torch.Tensor (N_BATCH, N_QM_ATOMS,),
                  torch.Tensor (N_BATCH, N_QM_ATOMS * 3, N_QM_ATOMS * 3,),
-                 torch.Tensor (N_BATCH, N_QM_ATOMS,) or None,
                  torch.Tensor (N_BATCH, N_QM_ATOMS,) or None)
-            Valence widths, core charges, valence charges, A_thole tensor, A_exrep parameters, A_short_range_corr parameters
+            Valence widths, core charges, valence charges, A_thole tensor, C6 coefficients
         """
+        # Get AEVs.
+        mask, species_id, aev = self.get_aev_data(atomic_numbers, xyz_qm)
 
-        # Mask for padded coordinates.
-        mask = atomic_numbers > 0
-
-        # Convert the atomic numbers to species IDs.
-        species_id = self._species_map[atomic_numbers]
-
-        # Compute the AEVs.
-        aev = self._emle_aev_computer(species_id, xyz_qm)
-
-        # Compute the MBIS valence shell widths.
-        s, var = self._gpr(
-            aev, self._ref_mean_s, self._c_s, species_id, return_var=True
-        )
-
-        # TODO: DELETE THIS LATER
-        var_row = var.detach().cpu().numpy()
-        #_np.savetxt("output.txt", var_row, fmt='%f', delimiter=' ')
-
-        # Compute the electronegativities.
-        chi = self._gpr(aev, self._ref_mean_chi, self._c_chi, species_id)
-
-        # Convert coordinates to Bohr.
-        ANGSTROM_TO_BOHR = 1.8897261258369282
-        xyz_qm_bohr = xyz_qm * ANGSTROM_TO_BOHR
-
-        r_data = self._get_r_data(xyz_qm_bohr, mask)
-
-        q_core = self._q_core[species_id] * mask
-        q = self._get_q(r_data, s, chi, q_total, mask)
+        # Compute MBIS valence
+        s = self.get_s(aev, species_id)
+        chi = self.get_chi(aev, species_id)
+        q_core = self.get_q_core(species_id, mask)
+        q = self.get_q_val(xyz_qm, s, chi, q_total, mask)
         q_val = q - q_core
+        A_thole = self.get_A_thole(xyz_qm, s, q_val, species_id, aev, mask)
 
-        k = self.k_Z[species_id] * mask
-
-        if self._alpha_mode == "reference":
-            k_scale = (
-                self._gpr(aev, self._ref_mean_sqrtk, self._c_sqrtk, species_id) ** 2
-            )
-            k = k_scale * k
-
-        A_thole = self._get_A_thole(r_data, s, q_val, k, self.a_Thole)
-
-        # Optionally compute C6 dispersion coefficients.
-        if calc_c6 and self.c6_Z is not None:
-            c6 = self.c6_Z[species_id] * mask
-            c6_scale = self._gpr(aev, self._ref_mean_c6, self._c_c6, species_id) ** 2
-            c6_coeffs = c6_scale * c6
-        else:
-            c6_coeffs = None
-         
-
-        #_np.savetxt("c6_debug.txt", c6_coeffs.detach().cpu().numpy())
+        # Optionally compute C6
+        c6_coeffs = self.get_c6(species_id, aev, mask) if calc_c6 else None
 
         return s, q_core, q_val, A_thole, c6_coeffs
 
@@ -932,526 +1105,6 @@ class EMLEBase(_torch.nn.Module):
         return 1 - (1 + au3) * _torch.exp(-au3)
 
     @staticmethod
-    def get_static_energy(
-        q_core: Tensor,
-        q_val: Tensor,
-        q_core_mm: Tensor,
-        q_val_mm: Tensor,
-        mesh_data: Tuple[Tensor, Tensor, Tensor],
-        s_qm: Tensor = None,
-        s_mm: Tensor = None,
-    ) -> Tensor:
-        """
-        Calculate the static electrostatic energy.
-
-        Parameters
-        ----------
-
-        q_core: torch.Tensor (N_BATCH, N_QM_ATOMS,)
-            QM core charges.
-
-        q_val: torch.Tensor (N_BATCH, N_QM_ATOMS,)
-            QM valence charges.
-
-        q_core_mm: torch.Tensor (N_BATCH, N_MM_ATOMS,)
-            MM charges.
-
-        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS,)
-            MM charges.
-
-        mesh_data: mesh_data object (output of self._get_mesh_data)
-            Mesh data object.
-
-        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            Slater widths for QM atoms.
-
-        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            Slater widths for MM atoms.
-
-        Returns
-        -------
-
-        result: torch.Tensor (N_BATCH,)
-            Static electrostatic energy.
-        """
-        if s_qm is not None and s_mm is not None:
-            # Compute static energy with Slater valence distributions + point core charges for both QM and MM.
-            return EMLEBase._get_static_energy_slater(
-                q_core, q_val, q_core_mm, q_val_mm, mesh_data, s_qm, s_mm
-            )
-        else:
-            # Compute static energy with Slater valence distributions + point core charges for QM and point charges for MM.
-            vpot_q_core = EMLEBase._get_vpot_q(q_core, mesh_data[0])
-            vpot_q_val = EMLEBase._get_vpot_q(q_val, mesh_data[1])
-            vpot_static = vpot_q_core + vpot_q_val
-            return _torch.sum(vpot_static * q_core_mm, dim=1)
-
-    @staticmethod
-    def _get_static_energy_slater(
-        q_core_qm, q_val_qm, q_core_mm, q_val_mm, mesh_data, s_qm, s_mm
-    ):
-        """
-        Calculate the static electrostatic energy for a charge model consisting of
-        a combination of fixed-point core charges and valence Slater charge distributions.
-
-        Parameters
-        ----------
-        q_core_qm: torch.Tensor (N_BATCH, N_QM_ATOMS,)
-            QM core charges.
-
-        q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS,)
-            QM valence charges.
-
-        q_core_mm: torch.Tensor (N_BATCH, N_MM_ATOMS,)
-            MM core charges.
-
-        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS,)
-            MM valence charges.
-
-        mesh_data: mesh_data object (output of self._get_mesh_data)
-            Mesh data object.
-
-        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            Slater widths for QM atoms.
-
-        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            Slater widths for MM atoms.
-
-        Returns
-        -------
-        result: torch.Tensor (N_BATCH,)
-            Static electrostatic energy.
-        """
-        r_inv, T0_slater_qm_mm = mesh_data[0], mesh_data[1]
-        r = _torch.where(r_inv > 0, 1.0 / (r_inv + 1e-16), 0.0)
-        T0_slater_mm_qm = EMLEBase._get_T0_slater(r.permute(0, 2, 1), s_mm[:, :, None])
-
-        # Mask out interactions involving padded atoms
-        mask_s = (s_qm != 0)[:, :, None] & (s_mm != 0)[:, None, :]
-        T0_slater_qm_mm = T0_slater_qm_mm * mask_s
-        T0_slater_mm_qm = T0_slater_mm_qm * mask_s.permute(0, 2, 1)
-        r_inv = r_inv * mask_s
-
-        # Calculate electrostatic energy components
-        E_core_core = _torch.sum(
-            EMLEBase._get_vpot_q(q_core_qm, r_inv) * q_core_mm, dim=1
-        )
-        E_val_core = _torch.sum(
-            EMLEBase._get_vpot_q(q_val_qm, T0_slater_qm_mm) * q_core_mm, dim=1
-        )
-        E_core_val = _torch.sum(
-            EMLEBase._get_vpot_q(q_val_mm, T0_slater_mm_qm) * q_core_qm, dim=1
-        )
-        E_val_val = EMLEBase._get_valence_repulsion(q_val_qm, q_val_mm, r, s_qm, s_mm)
-        total = E_val_core + E_core_val + E_val_val + E_core_core
-        return total
-
-    @staticmethod
-    def _get_valence_repulsion(q_val_qm, q_val_mm, r, s_qm, s_mm):
-        """
-        Calculate the valence-valence repulsion term for Slater charge distributions.
-
-        Parameters
-        ----------
-        q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            QM valence charges.
-
-        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            MM valence charges.
-
-        r: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
-            Distance matrix between QM and MM atoms.
-
-        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            Slater widths for QM atoms.
-
-        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            Slater widths for MM atoms.
-
-        Returns
-        -------
-        result: torch.Tensor (N_BATCH,)
-            Valence-valence repulsion energy.
-        """
-
-        def f_diff(si, sj, r):
-            """Interaction between Slater functions with different widths."""
-            s_diff = si**2 - sj**2
-            f = (
-                (si**4 / (s_diff**2 + 1e-16))
-                * (1 + r / (2 * si + 1e-16) - 2 * sj**2 / (s_diff + 1e-16))
-                * _torch.exp(-r / (si + 1e-16))
-            )
-            return f
-
-        def f_same(si, sj, r):
-            """Interaction between Slater functions with the same widths."""
-            x = r / (si + 1e-16)
-            delta = sj - si
-            exp_x = _torch.exp(-x)
-            term1 = (1 + 11 / 16.0 * x + 3 / 16.0 * x**2 + 1 / 48.0 * x**3) * exp_x
-            term2 = (
-                (delta / (96.0 * si**2 + 1e-16))
-                * (15.0 + 15 * x + 6.0 * x**2 + x**3)
-                * exp_x
-            )
-            term3 = (
-                (delta**2 / (320.0 * si**3 + 1e-16))
-                * (20.0 + 20.0 * x + 5.0 * x**2 - 5.0 / 3 * x**3 - x**4)
-                * exp_x
-            )
-            f = (1 - term1) / (r + 1e-16) - term2 - term3
-            return f
-
-        s_mask = (s_qm > 0)[:, :, None] & (s_mm > 0)[:, None, :]
-        s_qm = s_qm[:, :, None]
-        s_mm = s_mm[:, None, :]
-        cp_corr_diff = (1 - f_diff(s_qm, s_mm, r) - f_diff(s_mm, s_qm, r)) / (r + 1e-16)
-        cp_corr_same = f_same(s_qm, s_mm, r)
-        cp_corr = _torch.where(
-            _torch.abs(s_qm - s_mm) < 1e-2, cp_corr_same, cp_corr_diff
-        )
-        return _torch.sum(
-            q_val_qm[:, :, None] * q_val_mm[:, None, :] * cp_corr * s_mask, dim=(1, 2)
-        )
-
-    def get_exchange_repulsion_energy(
-        self,
-        A_exrep_qm: Tensor,
-        A_exrep_mm: Tensor,
-        #B_exrep_qm: Tensor,
-        #B_exrep_mm: Tensor,
-        q_val_qm: Tensor,
-        q_val_mm: Tensor,
-        mesh_data: Tensor,
-        s_qm: Tensor,
-        s_mm: Tensor,
-        S: Tensor = None,
-    ) -> Tensor:
-        """
-        Calculate the exchange-repulsion energy between QM and MM valence Slater charge distributions.
-
-        Parameters
-        ----------
-        A_exrep_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            Exchange-repulsion parameters for QM atoms.
-
-        A_exrep_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            Exchange-repulsion parameters for MM atoms.
-
-        B_exrep_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            Exchange-repulsion parameters for QM atoms.
-        
-        B_exrep_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            Exchange-repulsion parameters for MM atoms.
-
-        q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            QM valence charges.
-
-        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            MM valence charges.
-
-        mesh_data: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
-            Mesh data object (output of self._get_mesh_data)
-
-        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            Slater widths for QM atoms.
-
-        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            Slater widths for MM atoms.
-
-        S: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
-            Precomputed Slater overlap integrals (optional).
-
-        Returns
-        -------
-        result: torch.Tensor (N_BATCH,)
-            Exchange-repulsion energy.
-        """
-        mask_s = (s_qm > 0)[:, :, None] & (s_mm > 0)[:, None, :]
-        A_exrep = A_exrep_qm[:, :, None] * A_exrep_mm[:, None, :]
-        # B_exrep = B_exrep_qm[:, :, None] * B_exrep_mm[:, None, :]
-
-        r_inv, _, _ = mesh_data
-        r = _torch.where(mesh_data[0] > 0, 1.0 / (mesh_data[0] + 1e-16), 0.0)
-        S = EMLEBase._get_slater_overlap(s_qm, s_mm, r) if S is None else S
-        q_prod = q_val_qm[:, :, None] * q_val_mm[:, None, :]
-        """
-        S = S * q_prod
-        Br = B_exrep * r
-        P = 1/3*Br**2 + Br + 1
-        final = A_exrep * P * _torch.exp(-Br)
-     
-        S = S * q_prod
-        # S = S ** 2
-        final = A_exrep * S * r_inv + B_exrep * S * r_inv ** 2
-        #return _torch.sum(final , dim=(1, 2))
-
-        return _torch.sum(final * mask_s, dim=(1, 2))
-        """
-        return _torch.sum(S * A_exrep * mask_s, dim=(1, 2))
-
-    @staticmethod
-    def get_sr_corr_energy(
-        A_short_range_corr_qm: Tensor,
-        A_short_range_corr_mm: Tensor,
-        q_val_qm: Tensor,
-        q_val_mm: Tensor,
-        mesh_data: Tensor,
-        s_qm: Tensor,
-        s_mm: Tensor,
-        S: Tensor = None,
-    ) -> Tensor:
-        """
-        Calculate the short-range correction energy between QM and MM valence Slater charge distributions.
-        This has exactly the same functional form as the exchange-repulsion energy.
-
-        Parameters
-        ----------
-        A_short_range_corr_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            Short-range correction parameters for QM atoms.
-
-        A_short_range_corr_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            Short-range correction parameters for MM atoms.
-
-        q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            QM valence charges.
-
-        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            MM valence charges.
-
-        mesh_data: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
-            Mesh data object (output of self._get_mesh_data)
-
-        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            Slater widths for QM atoms.
-
-        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            Slater widths for MM atoms.
-
-        S: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
-            Precomputed Slater overlap integrals (optional).
-
-        Returns
-        -------
-        result: torch.Tensor (N_BATCH,)
-            Short-range correction energy.
-        """
-        mask_s = (s_qm > 0)[:, :, None] & (s_mm > 0)[:, None, :]
-        A_short_range_corr = (
-            A_short_range_corr_qm[:, :, None] * A_short_range_corr_mm[:, None, :]
-        )
-        r = _torch.where(mesh_data[0] > 0, 1.0 / (mesh_data[0] + 1e-16), 0.0)
-        S = EMLEBase._get_slater_overlap(s_qm, s_mm, r) if S is None else S
-        q_prod = q_val_qm[:, :, None] * q_val_mm[:, None, :]
-        return -_torch.sum(S * A_short_range_corr * mask_s, dim=(1, 2))
-
-    @staticmethod
-    def _get_slater_overlap(s_qm: Tensor, s_mm: Tensor, r: Tensor) -> Tensor:
-        """
-        Overlap integral between two Slater functions.
-
-        Parameters
-        ----------
-        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS, 1)
-            Slater widths for QM atoms.
-
-        s_mm: torch.Tensor (N_BATCH, 1, N_MM_ATOMS)
-            Slater widths for MM atoms.
-
-        r: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
-            Distance matrix between QM and MM atoms.
-
-        Returns
-        -------
-        result: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
-            Overlap integrals.
-        """
-
-        def h_diff(si, sj, r):
-            """Overlap between Slater functions with different widths."""
-            s_diff = sj**2 - si**2
-            term1 = 4 * si**2 * sj**2 / (s_diff**3 + 1e-16)
-            term2 = (si * r) / (s_diff**2 + 1e-16)
-            return (term1 + term2) * _torch.exp(-r / (si + 1e-16))
-
-        def h_same(si, sj, r):
-            """Overlap between Slater functions with the same widths."""
-            s_diff = sj - si
-            x = r / (si + 1e-16)
-            exp_x = _torch.exp(-x)
-            term1 = 1 / (192 * _torch.pi * si**3 + 1e-16) * (3 + 3 * x + x**2) * exp_x
-            term2 = (
-                s_diff / (384 * si**4 + 1e-16) * (-9 - 9 * x - 2 * x**2 + x**3) * exp_x
-            )
-            term3 = (
-                s_diff**2
-                / (3840 * si**5 + 1e-16)
-                * (90 + 90 * x + 5 * x**2 - 25 * x**3 + 3 * x**4)
-                * exp_x
-            )
-            return term1 + term2 + term3
-
-        # Broadcast QM x MM
-        s_qm_exp = s_qm.unsqueeze(-1).expand(-1, -1, s_mm.size(1))
-        s_mm_exp = s_mm.unsqueeze(1).expand(-1, s_qm.size(1), -1)
-        mask_s = (s_qm_exp > 0) & (s_mm_exp > 0)
-
-        # Initialize result tensor
-        S = _torch.zeros_like(r)
-
-        # Masks
-        equal_mask = _torch.abs(s_qm_exp - s_mm_exp) < 1e-2
-        diff_mask = ~equal_mask
-
-        # Compute only on the elements where needed
-        if equal_mask.any():
-            si_eq = s_qm_exp[equal_mask]
-            sj_eq = s_mm_exp[equal_mask]
-            r_eq = r[equal_mask]
-            S[equal_mask] = h_same(si_eq, sj_eq, r_eq)
-
-        if diff_mask.any():
-            si_diff = s_qm_exp[diff_mask]
-            sj_diff = s_mm_exp[diff_mask]
-            r_diff = r[diff_mask]
-            S[diff_mask] = (
-                h_diff(si_diff, sj_diff, r_diff) + h_diff(sj_diff, si_diff, r_diff)
-            ) / (8 * _torch.pi * r_diff + 1e-16)
-
-        return S * mask_s
-
-    @staticmethod
-    def get_induced_energy(
-        A_thole: Tensor,
-        charges_mm: Tensor,
-        s: Tensor,
-        mesh_data: Tuple[Tensor, Tensor, Tensor],
-        mask: Tensor,
-    ) -> Tensor:
-        """
-        Calculate the induced electrostatic energy.
-
-        Parameters
-        ----------
-
-        A_thole: torch.Tensor (N_BATCH, MAX_QM_ATOMS * 3, MAX_QM_ATOMS * 3)
-            The A matrix for induced dipoles prediction.
-
-        charges_mm: torch.Tensor (N_BATCH, MAX_MM_ATOMS,)
-            MM charges.
-
-        s: torch.Tensor (N_BATCH, MAX_QM_ATOMS,)
-            MBIS valence shell widths.
-
-        mesh_data: mesh_data object (output of self._get_mesh_data)
-            Mesh data object.
-
-        mask: torch.Tensor (N_BATCH, MAX_QM_ATOMS)
-            Mask for padded coordinates.
-
-        Returns
-        -------
-
-        result: torch.Tensor (N_BATCH,)
-            Induced electrostatic energy.
-        """
-        mu_ind = EMLEBase._get_mu_ind(A_thole, mesh_data, charges_mm, s, mask)
-        vpot_ind = EMLEBase._get_vpot_mu(mu_ind, mesh_data[2])
-        return _torch.sum(vpot_ind * charges_mm, dim=1) * 0.5
-
-    @staticmethod
-    def _get_mu_ind(
-        A: Tensor,
-        mesh_data: Tuple[Tensor, Tensor, Tensor],
-        q: Tensor,
-        s: Tensor,
-        mask: Tensor,
-    ) -> Tensor:
-        """
-        Internal method, calculates induced atomic dipoles
-        (Eq. 20 in 10.1021/acs.jctc.2c00914)
-
-        Parameters
-        ----------
-
-        A: torch.Tensor (N_BATCH, MAX_QM_ATOMS * 3, MAX_QM_ATOMS * 3)
-            The A matrix for induced dipoles prediction.
-
-        mesh_data: mesh_data object (output of self._get_mesh_data)
-
-        q: torch.Tensor (N_BATCH, MAX_MM_ATOMS,)
-            MM point charges.
-
-        s: torch.Tensor (N_BATCH, MAX_QM_ATOMS,)
-            MBIS valence shell widths.
-
-        q_val: torch.Tensor (N_BATCH, MAX_QM_ATOMS,)
-            MBIS valence charges.
-
-        mask: torch.Tensor (N_BATCH, MAX_QM_ATOMS)
-            Mask for padded coordinates.
-
-        Returns
-        -------
-
-        result: torch.Tensor (N_BATCH, MAX_QM_ATOMS, 3)
-            Array of induced dipoles
-        """
-        r = 1.0 / mesh_data[0]
-        fields = _torch.sum(mesh_data[2] * q[:, None, :, None], dim=2).reshape(
-            len(s), -1
-        )
-
-        mu_ind = _torch.linalg.solve(A, fields)
-        return mu_ind.reshape((mu_ind.shape[0], -1, 3))
-
-    @staticmethod
-    def _get_vpot_q(q, T0):
-        """
-        Internal method to calculate the electrostatic potential.
-
-        Parameters
-        ----------
-
-        q: torch.Tensor (N_BATCH, MAX_QM_ATOMS,)
-            QM charges (q_core or q_val).
-
-        T0: torch.Tensor (N_BATCH, MAX_QM_ATOMS, MAX_MM_ATOMS)
-            T0 tensor for QM atoms over MM atom positions.
-
-        Returns
-        -------
-
-        result: torch.Tensor (N_BATCH, MAX_MM_ATOMS)
-            Electrostatic potential over MM atoms.
-        """
-        return _torch.sum(T0 * q[:, :, None], dim=1)
-
-    @staticmethod
-    def _get_vpot_mu(mu: Tensor, T1: Tensor) -> Tensor:
-        """
-        Internal method to calculate the electrostatic potential generated
-        by atomic dipoles.
-
-        Parameters
-        ----------
-
-        mu: torch.Tensor (N_BATCH, MAX_QM_ATOMS, 3)
-            Atomic dipoles.
-
-        T1: torch.Tensor (N_BATCH, MAX_QM_ATOMS, MAX_MM_ATOMS, 3)
-            T1 tensor for QM atoms over MM atom positions.
-
-        Returns
-        -------
-
-        result: torch.Tensor (N_BATCH, MAX_MM_ATOMS)
-            Electrostatic potential over MM atoms.
-        """
-        return -_torch.einsum("ijkl,ijl->ik", T1, mu)
-
-    @staticmethod
     def _get_mesh_data(
         xyz: Tensor, xyz_mesh: Tensor, s: Tensor, mask: Tensor
     ) -> Tuple[Tensor, Tensor, Tensor]:
@@ -1538,184 +1191,3 @@ class EMLEBase(_torch.nn.Module):
         return (1 - (1 + r / (s * 2 + 1e-16)) * _torch.exp(-r / (s + 1e-16))) / (
             r + 1e-16
         )
-
-    @staticmethod
-    def get_dispersion_energy(
-        c6_qm: Tensor,
-        c6_mm: Tensor,
-        s_qm: Tensor,
-        s_mm: Tensor,
-        mesh_data: Tuple[Tensor, Tensor, Tensor],
-        tang_toennies: bool = True,
-    ) -> Tensor:
-        """
-        Calculate the dispersion energy.
-
-        Parameters
-        ----------
-
-        c6_qm: Tensor (N_BATCH, N_QM_ATOMS)
-            C6 coefficients for QM atoms.
-
-        c6_mm: Tensor (N_BATCH, N_MM_ATOMS)
-            C6 coefficients for MM atoms.
-
-        s_qm: Tensor (N_BATCH, N_QM_ATOMS)
-            Valence shell widths for QM atoms.
-
-        s_mm: Tensor (N_BATCH, N_MM_ATOMS)
-            Valence shell widths for MM atoms.
-
-        mesh_data: Tuple[Tensor, Tensor, Tensor]
-            Mesh data tuple containing (r_inv, r_vec, s_outer_product).
-            r_inv: Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS) of inverse QM-MM distances.
-
-        tang_toennies: bool
-            Whether to apply Tang-Toennies damping function.
-
-        Returns
-        -------
-
-        Tensor (N_BATCH,)
-            Total dispersion energy for each batch element in atomic units.
-        """
-        # Get distances
-        r_inv, _, _ = mesh_data
-
-        # Tang-Toennies damping function of order 6
-        if tang_toennies:
-            x_damp = 1.0 / ((s_qm[:, :, None] + s_mm[:, None, :]) * r_inv * 0.5)
-            f6_damp = 1 - _torch.exp(-x_damp) * (
-                1
-                + x_damp
-                + x_damp**2 / 2
-                + x_damp**3 / 6
-                + x_damp**4 / 24
-                + x_damp**5 / 120
-                + x_damp**6 / 720
-            )
-        else:
-            f6_damp = 1.0
-
-        # Lorentz-Berthelot combining rules for C6
-        c6_product = c6_qm[:, :, None] * c6_mm[:, None, :]
-        c6 = _torch.where(c6_product > 0, _torch.sqrt(c6_product + 1e-16), 0.0)
-        disp_energy = -c6 * r_inv**6 * f6_damp
-        disp_energy = disp_energy.sum(dim=(1, 2))
-        return disp_energy
-
-    @staticmethod
-    def get_lj_energy(
-        sigma_qm: Tensor,
-        epsilon_qm: Tensor,
-        sigma_mm: Tensor,
-        epsilon_mm: Tensor,
-        mesh_data: Tuple[Tensor, Tensor, Tensor],
-    ) -> Tensor:
-        """
-        Calculate the Lennard-Jones energy.
-
-        Parameters
-        ----------
-
-        sigma_qm: Tensor (N_BATCH, N_QM_ATOMS)
-            Lennard-Jones sigma values in Bohr.
-
-        epsilon_qm: Tensor (N_BATCH, N_QM_ATOMS)
-            Lennard-Jones epsilon values in atomic units.
-
-        sigma_mm: Tensor (N_BATCH, N_MM_ATOMS)
-            Lennard-Jones sigma values in Bohr.
-
-        epsilon_mm: Tensor (N_BATCH, N_MM_ATOMS)
-            Lennard-Jones epsilon values in atomic units.
-
-        mesh_data: Tuple[Tensor, Tensor, Tensor]
-            Mesh data tuple containing (r_inv, r_vec, s_outer_product).
-            r_inv: Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS) of inverse QM-MM distances.
-
-        Returns
-        -------
-
-        Tensor (N_BATCH,)
-            Total Lennard-Jones energy for each batch element in atomic units.
-        """
-        ANGSTROM_TO_BOHR = 1.8897259886
-        KJ_MOL_TO_HARTREE = 1.0 / 2625.5002
- 
-        mask_H = (sigma_mm - 1.8897).abs() < 1e-3
-        mask_O = (sigma_mm - 5.9540).abs() < 1e-3
-        epsilon_mm[mask_H] = 0.04102677991569812 * KJ_MOL_TO_HARTREE
-        sigma_mm[mask_H] = 2.501348134279251 * ANGSTROM_TO_BOHR
-        epsilon_mm[mask_O] = 0.4943618410643088  * KJ_MOL_TO_HARTREE
-        sigma_mm[mask_O] = 2.992692406177521 * ANGSTROM_TO_BOHR
-            
-        # Lorentz-Berthelot combining rules
-        sigma = 0.5 * (sigma_qm[:, :, None] + sigma_mm[:, None, :])
-        epsilon_product = epsilon_qm[:, :, None] * epsilon_mm[:, None, :]
-        epsilon = _torch.where(
-            epsilon_product > 0, _torch.sqrt(epsilon_product + 1e-16), 0.0
-        )
-
-        # Get distances
-        r_inv, _, _ = mesh_data
-        sigma_r_inv_6 = (sigma * r_inv) ** 6
-        sigma_r_inv_12 = sigma_r_inv_6 * sigma_r_inv_6
-        lj_energy = 4 * epsilon * (sigma_r_inv_12 - sigma_r_inv_6)
-        lj_energy = lj_energy.sum(dim=(1, 2))
-
-        return lj_energy
-
-    
-        def get_isotropic_polarizabilities(
-            self, A_thole: _torch.Tensor, mask: Optional[_torch.Tensor] = None
-        ) -> _torch.Tensor:
-            """
-            Compute isotropic polarizabilities.
-
-            Parameters
-            ----------
-            A_thole : torch.Tensor
-                Full polarizability tensor. Shape: (3N, 3N) or (B, 3N, 3N).
-
-            Returns
-            -------
-            torch.Tensor
-                Isotropic polarizabilities alpha per atom. Shape: (N,) or (B, N).
-            """
-            batch, dim, _ = A_thole.shape
-            n_atoms = dim // 3
-            Ainv = _torch.linalg.inv(A_thole)   
-            Ainv_blocks = Ainv.reshape(batch, n_atoms, 3, n_atoms, 3)
-            block_traces = _torch.diagonal(Ainv_blocks, dim1=2, dim2=4)
-            block_traces = block_traces.sum(dim=-1)
-            per_atom = block_traces.sum(dim=-1) / 3.0   
-            if mask is not None:
-                per_atom = per_atom * mask
-            return per_atom
-
-    def get_lj_parameters(self, c6: Tensor, alpha: Tensor) -> Tuple[Tensor, Tensor]:
-        """
-        Calculate Lennard-Jones sigma and epsilon parameters.
-
-        Parameters
-        ----------
-
-        c6: _torch.Tensor(N_BATCH, N_ATOMS)
-            C6 coefficients per atom.
-
-        alpha: _torch.Tensor(N_BATCH, N_ATOMS)
-            Isotropic polarizabilities per atom.
-
-        Returns
-        -------
-
-        Tuple[torch.Tensor, torch.Tensor]
-            Tuple containing the sigma (Bohr) and epsilon (Hartree) LJ parameters for each atom.
-        """
-        radius = 2.54 * alpha ** (1.0 / 7.0)
-        rmin = 2 * radius
-        sigma = rmin / (2 ** (1.0 / 6.0))
-        epsilon = c6 / (2 * rmin**6.0)
-
-        return sigma, epsilon

@@ -388,23 +388,23 @@ class ExchangeRepulsionLoss(_BaseLoss):
         """
         A_exrep_qm = self._nagl_model(graphs_qm)["A_exrep"].abs()
         A_exrep_mm = self._nagl_model(graphs_mm)["A_exrep"].abs()
-        #B_exrep_qm = self._nagl_model(graphs_qm)["B_exrep"].abs()
-        #B_exrep_mm = self._nagl_model(graphs_mm)["B_exrep"].abs()
-        #A_exrep_qm = self._nagl_model(graphs_qm)["joint"][:,:,0].abs()
-        #A_exrep_mm = self._nagl_model(graphs_mm)["joint"][:,:,0].abs()
-        
+        # B_exrep_qm = self._nagl_model(graphs_qm)["B_exrep"].abs()
+        # B_exrep_mm = self._nagl_model(graphs_mm)["B_exrep"].abs()
+        # A_exrep_qm = self._nagl_model(graphs_qm)["joint"][:,:,0].abs()
+        # A_exrep_mm = self._nagl_model(graphs_mm)["joint"][:,:,0].abs()
+
         A_exrep_qm = _torch.nn.functional.pad(
             A_exrep_qm, (0, q_val_qm.size(1) - A_exrep_qm.size(1))
         )
         A_exrep_mm = _torch.nn.functional.pad(
             A_exrep_mm, (0, q_val_mm.size(1) - A_exrep_mm.size(1))
         )
-        #B_exrep_qm = _torch.nn.functional.pad(
+        # B_exrep_qm = _torch.nn.functional.pad(
         #    B_exrep_qm, (0, q_val_qm.size(1) - B_exrep_qm.size(1))
-        #)
-        #B_exrep_mm = _torch.nn.functional.pad(
+        # )
+        # B_exrep_mm = _torch.nn.functional.pad(
         #    B_exrep_mm, (0, q_val_mm.size(1) - B_exrep_mm.size(1))
-        #)
+        # )
         values = self._emle_base.get_exchange_repulsion_energy(
             A_exrep_qm, A_exrep_mm, q_val_qm, q_val_mm, mesh_data, s_qm, s_mm
         )
@@ -501,9 +501,9 @@ class ShortRangeCorrectionLoss(_BaseLoss):
         """
         A_exrep_qm = self._nagl_model(graphs_qm)["A_sr_corr"]
         A_exrep_mm = self._nagl_model(graphs_mm)["A_sr_corr"]
-        #A_exrep_qm = self._nagl_model(graphs_qm)["joint"][:,:,1].abs()
-        #A_exrep_mm = self._nagl_model(graphs_mm)["joint"][:,:,1].abs()
-        
+        # A_exrep_qm = self._nagl_model(graphs_qm)["joint"][:,:,1].abs()
+        # A_exrep_mm = self._nagl_model(graphs_mm)["joint"][:,:,1].abs()
+
         A_exrep_qm = _torch.nn.functional.pad(
             A_exrep_qm, (0, q_val_qm.size(1) - A_exrep_qm.size(1))
         )
@@ -666,9 +666,9 @@ class SLoss(_BaseLoss):
         """
         mask = target > 0
         values = self._nagl_model(graphs)["s"]
-        values = _torch.nn.functional.pad(
-            values, (0, target.size(1) - values.size(1))
-        )[mask]
+        values = _torch.nn.functional.pad(values, (0, target.size(1) - values.size(1)))[
+            mask
+        ]
         target = target[mask]
         return (
             self._loss(values, target),
@@ -677,6 +677,7 @@ class SLoss(_BaseLoss):
             values,
             target,
         )
+
 
 class DispersionCoefficientLoss(_BaseLoss):
     """
@@ -718,9 +719,7 @@ class DispersionCoefficientLoss(_BaseLoss):
         self._update_c6_gpr(self._emle_base)
 
         # Calculate C6.
-        _, _, _, _, c6 = self._emle_base(
-            atomic_numbers, xyz, q_mol, calc_c6=True
-        )
+        _, _, _, _, c6 = self._emle_base(atomic_numbers, xyz, q_mol, calc_c6=True)
 
         # Mask out dummy atoms.
         mask = atomic_numbers > 0
