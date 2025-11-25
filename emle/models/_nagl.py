@@ -113,6 +113,7 @@ class NAGLEMLE(_torch.nn.Module):
             atoms.AtomConnectivity(),
             atoms.AtomAverageFormalCharge(),
             atoms.AtomHybridization(),
+            atoms.AtomIsAromatic(),
             atoms.AtomInRingOfSize(ring_size=3),
             atoms.AtomInRingOfSize(ring_size=4),
             atoms.AtomInRingOfSize(ring_size=5),

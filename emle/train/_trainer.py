@@ -862,13 +862,13 @@ class EMLETrainer:
 
         # Create the NAGL model
         nagl = NAGLEMLE(
-            species=[int(z) for z in species] + [16],
+            species=[1, 6, 7, 8, 16],
             properties=["A_exrep", "A_sr_corr", "s"],
             n_conv_layers=4,
             hidden_dim=512,
             n_ffnn_layers=4,
             #model_filepath="/home/joaomorado/repos/emle-bespoke/examples/DES_dimers/ws/emle_nagl.pt"
-        ).to(device)
+        ).to(device=device, dtype=dtype)
 
         # Create OpenFF molecules and dataloaders
         _logger.info("Creating OpenFF molecules and dataloaders for QM region...")
@@ -1057,7 +1057,7 @@ class EMLETrainer:
             xyz_qm_train * ANGSTROM_TO_BOHR,
             xyz_mm_train * ANGSTROM_TO_BOHR,
             s_qm_train,
-            mask,
+            mask
         )
 
         _logger.info("Creating dataloaders for training tensors...")
@@ -1100,6 +1100,7 @@ class EMLETrainer:
             A_thole_qm_train,
             *mesh_data,
         )
+
         dataloader_tensors = _DataLoader(
             dataset_tensors, batch_size=batch_size, shuffle=False
         )
@@ -1113,8 +1114,12 @@ class EMLETrainer:
         opt_parameters = [
             param for name, param in nagl.named_parameters() if "A_exrep" in name
         ]
+        #opt_parameters += [
+        #    param for name, param in nagl.named_parameters() if "B_exrep" in name
+        #]
+
         _logger.info(
-            f"Optimizing parameters: {[name for name, _ in nagl.named_parameters() if 'A_exrep' in name]}"
+            f"Optimizing parameters: {[name for name, _ in nagl.named_parameters() if 'A_exrep' in name or 'B_exrep' in name]}"
         )
         optimizer = _torch.optim.Adam(opt_parameters, lr=lr_exrep)
         for epoch in range(epochs):
@@ -1135,9 +1140,9 @@ class EMLETrainer:
                     e_exrep_train,
                     _,
                     _,
-                    _,
                     *mesh_data,
                 ) = tensor_batch
+                
                 loss, rmse, max_error, v, t = loss_instance(
                     graphs_qm_batch,
                     graphs_mm_batch,
@@ -1191,10 +1196,9 @@ class EMLETrainer:
                     e_exrep_train,
                     e_sr_corr_train,
                     A_thole_qm_train,
-                    c6_qm_train,
                     *mesh_data,
                 ) = tensor_batch
-                """
+            
                 # Static energy
                 E_static = emle_base._get_static_energy_slater(
                     q_core_qm_train,
@@ -1205,7 +1209,6 @@ class EMLETrainer:
                     s_qm_train,
                     s_mm_train,
                 )
-           
 
                 # Induction energy
                 charges_mm = q_core_mm_train + q_val_mm_train
@@ -1213,20 +1216,29 @@ class EMLETrainer:
                 E_ind = emle_base.get_induced_energy(
                     A_thole_qm_train, charges_mm, s_qm_train, mesh_data, mask
                 )
-                """
+           
                 # Exchange-repulsion
                 A_exrep_qm = nagl(graphs_qm_batch)["A_exrep"]
                 A_exrep_mm = nagl(graphs_mm_batch)["A_exrep"]
+                #B_exrep_qm = nagl(graphs_qm_batch)["B_exrep"]
+                #B_exrep_mm = nagl(graphs_mm_batch)["B_exrep"]
                 A_exrep_qm = _torch.nn.functional.pad(
                     A_exrep_qm, (0, q_val_qm_train.size(1) - A_exrep_qm.size(1))
                 )
                 A_exrep_mm = _torch.nn.functional.pad(
                     A_exrep_mm, (0, q_val_mm_train.size(1) - A_exrep_mm.size(1))
                 )
-
+                #B_exrep_qm = _torch.nn.functional.pad(
+                #    B_exrep_qm, (0, q_val_qm_train.size(1) - B_exrep_qm.size(1))
+                #)
+                #B_exrep_mm = _torch.nn.functional.pad(
+                #    B_exrep_mm, (0, q_val_mm_train.size(1) - B_exrep_mm.size(1))
+                #)
                 E_exrep = emle_base.get_exchange_repulsion_energy(
                     A_exrep_qm,
                     A_exrep_mm,
+                    #B_exrep_qm,
+                    #B_exrep_mm,
                     q_val_qm_train,
                     q_val_mm_train,
                     mesh_data,
@@ -1249,9 +1261,9 @@ class EMLETrainer:
                 """
 
                 # Append
-                E_static_emle.append(E_exrep)
-                E_ind_emle.append(E_exrep)
-                E_exrep_emle.append(E_exrep) # Placeholder TODO: fix dispersion
+                E_static_emle.append(E_static)
+                E_ind_emle.append(E_ind)
+                E_exrep_emle.append(E_exrep) 
                 E_disp_emle.append(E_exrep) # Placeholder TODO: fix dispersion
 
         E_static_emle = _torch.cat(E_static_emle)
@@ -1293,7 +1305,7 @@ class EMLETrainer:
             ):
                 optimizer.zero_grad()
                 (
-                    _,
+                    _,  
                     q_val_qm_train,
                     _,
                     q_val_mm_train,
@@ -1302,12 +1314,11 @@ class EMLETrainer:
                     _,
                     e_sr_corr_train,
                     _,
-                    _,
                     *mesh_data,
                 ) = tensor_batch
                 e_static_train, e_ind_train, e_exrep_train, e_disp_train = energies_batch
                 e_target_train = e_sr_corr_train
-                offset = 0.0# (e_static_train + e_ind_train + e_exrep_train) * 2625.5002
+                offset = (e_static_train + e_ind_train + e_exrep_train) * 2625.5002
                 e_target_train = e_target_train
                 loss, rmse, max_error, v, t = loss_instance(
                     graphs_qm_batch,

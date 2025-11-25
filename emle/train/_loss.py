@@ -388,6 +388,8 @@ class ExchangeRepulsionLoss(_BaseLoss):
         """
         A_exrep_qm = self._nagl_model(graphs_qm)["A_exrep"].abs()
         A_exrep_mm = self._nagl_model(graphs_mm)["A_exrep"].abs()
+        #B_exrep_qm = self._nagl_model(graphs_qm)["B_exrep"].abs()
+        #B_exrep_mm = self._nagl_model(graphs_mm)["B_exrep"].abs()
         #A_exrep_qm = self._nagl_model(graphs_qm)["joint"][:,:,0].abs()
         #A_exrep_mm = self._nagl_model(graphs_mm)["joint"][:,:,0].abs()
         
@@ -397,6 +399,12 @@ class ExchangeRepulsionLoss(_BaseLoss):
         A_exrep_mm = _torch.nn.functional.pad(
             A_exrep_mm, (0, q_val_mm.size(1) - A_exrep_mm.size(1))
         )
+        #B_exrep_qm = _torch.nn.functional.pad(
+        #    B_exrep_qm, (0, q_val_qm.size(1) - B_exrep_qm.size(1))
+        #)
+        #B_exrep_mm = _torch.nn.functional.pad(
+        #    B_exrep_mm, (0, q_val_mm.size(1) - B_exrep_mm.size(1))
+        #)
         values = self._emle_base.get_exchange_repulsion_energy(
             A_exrep_qm, A_exrep_mm, q_val_qm, q_val_mm, mesh_data, s_qm, s_mm
         )

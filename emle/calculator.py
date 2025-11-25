@@ -1886,9 +1886,6 @@ class EMLECalculator:
             # Compute the NAGL properties.
             with _torch.no_grad():
                 props = nagl(nagl_mol)
-                #s_list.append(props["s"])
-                #A_exrep_list.append(props["A_exrep"])
-                #A_sr_corr_list.append(props["A_sr_corr"])
                 s_list.append(props["s"])
                 A_exrep_list.append(props["A_exrep"])
                 A_sr_corr_list.append(props["A_sr_corr"])

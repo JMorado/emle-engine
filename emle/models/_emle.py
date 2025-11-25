@@ -94,7 +94,7 @@ class EMLE(_torch.nn.Module):
         dtype=None,
         create_aev_calculator=True,
         nagl_params: dict = None,
-        dispersion_mode: str = "c6",
+        dispersion_mode: str = None,
         emle_plus_cp: bool = False,
         emle_plus_exrep: bool = False,
         emle_plus_sr_corr: bool = False,
@@ -705,18 +705,14 @@ class EMLE(_torch.nn.Module):
             E_disp = _torch.zeros_like(
                 E_static, dtype=self._charges_mm.dtype, device=self._device
             )
-        """
-        #if self._method == "electrostatic":
-        print(
-            f'Method: {self._method},',
-            f'Dispersion: {self._dispersion_mode}, '
-            f"EMLE static: {E_static.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
-            f"induced: {E_ind.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
-            f"exrep: {E_exrep.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
-            f"short-range corr: {E_short_range_corr.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
-            f"dispersion: {E_disp.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol"
-        )
-        """
+        if self._method in ["electrostatic", "nonpol"]:
+            print(
+                f"EMLE static: {E_static.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                f"induced: {E_ind.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                f"exrep: {E_exrep.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                f"short-range corr: {E_short_range_corr.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                f"dispersion: {E_disp.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol"
+            )
         return _torch.stack(
             (E_static, E_ind, E_exrep, E_short_range_corr, E_disp), dim=0
         )

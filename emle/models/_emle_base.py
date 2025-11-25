@@ -32,7 +32,7 @@ import numpy as _np
 import torch as _torch
 
 from torch import Tensor
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torchani as _torchani
 
@@ -278,6 +278,9 @@ class EMLEBase(_torch.nn.Module):
         self.register_buffer("_c_chi", c_chi)
         self.register_buffer("_c_sqrtk", c_sqrtk)
         self.register_buffer("_c_c6", c_c6)
+        
+        # Exponential coeff for exchange-repulsion and short-range correction
+        self._gamma_exrep = _torch.nn.Parameter(_torch.tensor(params.get("gamma_exrep", 1.0), dtype=dtype, device=device))
 
         # Register NAGL parameters if provided.
         for nagl_param in [
@@ -1112,10 +1115,12 @@ class EMLEBase(_torch.nn.Module):
             q_val_qm[:, :, None] * q_val_mm[:, None, :] * cp_corr * s_mask, dim=(1, 2)
         )
 
-    @staticmethod
     def get_exchange_repulsion_energy(
+        self,
         A_exrep_qm: Tensor,
         A_exrep_mm: Tensor,
+        #B_exrep_qm: Tensor,
+        #B_exrep_mm: Tensor,
         q_val_qm: Tensor,
         q_val_mm: Tensor,
         mesh_data: Tensor,
@@ -1132,6 +1137,12 @@ class EMLEBase(_torch.nn.Module):
             Exchange-repulsion parameters for QM atoms.
 
         A_exrep_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Exchange-repulsion parameters for MM atoms.
+
+        B_exrep_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Exchange-repulsion parameters for QM atoms.
+        
+        B_exrep_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
             Exchange-repulsion parameters for MM atoms.
 
         q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
@@ -1159,10 +1170,26 @@ class EMLEBase(_torch.nn.Module):
         """
         mask_s = (s_qm > 0)[:, :, None] & (s_mm > 0)[:, None, :]
         A_exrep = A_exrep_qm[:, :, None] * A_exrep_mm[:, None, :]
+        # B_exrep = B_exrep_qm[:, :, None] * B_exrep_mm[:, None, :]
+
+        r_inv, _, _ = mesh_data
         r = _torch.where(mesh_data[0] > 0, 1.0 / (mesh_data[0] + 1e-16), 0.0)
         S = EMLEBase._get_slater_overlap(s_qm, s_mm, r) if S is None else S
-        q_prod = 1#q_val_qm[:, :, None] * q_val_mm[:, None, :]
-        return _torch.sum(q_prod * S * A_exrep * mask_s, dim=(1, 2))
+        q_prod = q_val_qm[:, :, None] * q_val_mm[:, None, :]
+        """
+        S = S * q_prod
+        Br = B_exrep * r
+        P = 1/3*Br**2 + Br + 1
+        final = A_exrep * P * _torch.exp(-Br)
+     
+        S = S * q_prod
+        # S = S ** 2
+        final = A_exrep * S * r_inv + B_exrep * S * r_inv ** 2
+        #return _torch.sum(final , dim=(1, 2))
+
+        return _torch.sum(final * mask_s, dim=(1, 2))
+        """
+        return _torch.sum(S * A_exrep * mask_s, dim=(1, 2))
 
     @staticmethod
     def get_sr_corr_energy(
@@ -1216,8 +1243,8 @@ class EMLEBase(_torch.nn.Module):
         )
         r = _torch.where(mesh_data[0] > 0, 1.0 / (mesh_data[0] + 1e-16), 0.0)
         S = EMLEBase._get_slater_overlap(s_qm, s_mm, r) if S is None else S
-        q_prod =1# q_val_qm[:, :, None] * q_val_mm[:, None, :]
-        return -_torch.sum(q_prod * S * A_short_range_corr * mask_s, dim=(1, 2))
+        q_prod = q_val_qm[:, :, None] * q_val_mm[:, None, :]
+        return -_torch.sum(S * A_short_range_corr * mask_s, dim=(1, 2))
 
     @staticmethod
     def _get_slater_overlap(s_qm: Tensor, s_mm: Tensor, r: Tensor) -> Tensor:
@@ -1613,6 +1640,16 @@ class EMLEBase(_torch.nn.Module):
         Tensor (N_BATCH,)
             Total Lennard-Jones energy for each batch element in atomic units.
         """
+        ANGSTROM_TO_BOHR = 1.8897259886
+        KJ_MOL_TO_HARTREE = 1.0 / 2625.5002
+ 
+        mask_H = (sigma_mm - 1.8897).abs() < 1e-3
+        mask_O = (sigma_mm - 5.9540).abs() < 1e-3
+        epsilon_mm[mask_H] = 0.04102677991569812 * KJ_MOL_TO_HARTREE
+        sigma_mm[mask_H] = 2.501348134279251 * ANGSTROM_TO_BOHR
+        epsilon_mm[mask_O] = 0.4943618410643088  * KJ_MOL_TO_HARTREE
+        sigma_mm[mask_O] = 2.992692406177521 * ANGSTROM_TO_BOHR
+            
         # Lorentz-Berthelot combining rules
         sigma = 0.5 * (sigma_qm[:, :, None] + sigma_mm[:, None, :])
         epsilon_product = epsilon_qm[:, :, None] * epsilon_mm[:, None, :]
@@ -1629,42 +1666,33 @@ class EMLEBase(_torch.nn.Module):
 
         return lj_energy
 
-    @staticmethod
-    def get_isotropic_polarizabilities(A_thole: Tensor) -> Tensor:
-        """
-        Calculate isotropic polarizabilities from the A_thole tensor.
-
-        Parameters
-        ----------
-
-        A_thole : torch.Tensor(N_BATCH, 3N_ATOMS, 3N_ATOMS)
-            Full polarizability tensor in block form.
-
-        Returns
-        -------
-
-        torch.Tensor(N_BATCH, N_ATOMS)
-            Isotropic polarizabilities per atom.
-        """
-
-        def _get_traces(A_thole: Tensor) -> Tensor:
+    
+        def get_isotropic_polarizabilities(
+            self, A_thole: _torch.Tensor, mask: Optional[_torch.Tensor] = None
+        ) -> _torch.Tensor:
             """
-            Compute the trace of the inverse of each 3x3 block in each polarizability tensor.
+            Compute isotropic polarizabilities.
+
+            Parameters
+            ----------
+            A_thole : torch.Tensor
+                Full polarizability tensor. Shape: (3N, 3N) or (B, 3N, 3N).
+
+            Returns
+            -------
+            torch.Tensor
+                Isotropic polarizabilities alpha per atom. Shape: (N,) or (B, N).
             """
-            n_mol, dim, _ = A_thole.shape
-            if dim % 3 != 0:
-                raise ValueError("Dimension of A_thole must be divisible by 3.")
+            batch, dim, _ = A_thole.shape
             n_atoms = dim // 3
-            diagonal_blocks = _torch.zeros(
-                (n_mol, n_atoms, 3, 3), dtype=A_thole.dtype, device=A_thole.device
-            )
-            for i in range(n_atoms):
-                diagonal_blocks[:, i, :, :] = A_thole[:, 3*i:3*i+3, 3*i:3*i+3]
-            inv_blocks = _torch.inverse(diagonal_blocks)
-            traces = _torch.diagonal(inv_blocks, dim1=-2, dim2=-1).sum(dim=-1)
-            return traces
-
-        return _get_traces(A_thole) / 3.0
+            Ainv = _torch.linalg.inv(A_thole)   
+            Ainv_blocks = Ainv.reshape(batch, n_atoms, 3, n_atoms, 3)
+            block_traces = _torch.diagonal(Ainv_blocks, dim1=2, dim2=4)
+            block_traces = block_traces.sum(dim=-1)
+            per_atom = block_traces.sum(dim=-1) / 3.0   
+            if mask is not None:
+                per_atom = per_atom * mask
+            return per_atom
 
     def get_lj_parameters(self, c6: Tensor, alpha: Tensor) -> Tuple[Tensor, Tensor]:
         """
