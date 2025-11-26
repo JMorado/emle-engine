@@ -197,7 +197,7 @@ class EMLEBase(_torch.nn.Module):
         # self.a_Gauss = (
         #    _torch.nn.Parameter(params["a_Gauss"]) if "a_Gauss" in params else None
         # )
-    
+
         self.a_Gauss = _torch.nn.Parameter(
             _torch.tensor(1.44, dtype=dtype, device=device)
         )
@@ -655,7 +655,6 @@ class EMLEBase(_torch.nn.Module):
 
         return self._get_A_thole(r_data, s, q_val, k, self.a_Thole)
 
-
     def forward(self, atomic_numbers, xyz_qm, q_total):
         """
         Compute the valence widths, core charges, valence charges, and
@@ -789,7 +788,7 @@ class EMLEBase(_torch.nn.Module):
             zid.shape, dtype=mol_features.dtype, device=mol_features.device
         )
 
-        #if return_var:
+        # if return_var:
         #     var = _torch.zeros_like(result)
 
         for i in range(len(self._n_ref)):
@@ -800,12 +799,12 @@ class EMLEBase(_torch.nn.Module):
             K_mol_ref2 = (mol_features_z @ ref_features_z.T) ** 2
             result[zid == i] = K_mol_ref2 @ c[i, :n_ref] + ref_mean[i]
 
-            #if return_var:
+            # if return_var:
             #    K_inv = self._Kinv[i, :n_ref, :n_ref]
             #    tmp = K_mol_ref2 @ K_inv
             #    var[zid == i] = 1.0 - _torch.sum(tmp * K_mol_ref2, dim=1)
 
-        return result #if not return_var else (result, var)
+        return result  # if not return_var else (result, var)
 
     @classmethod
     def _get_r_data(cls, xyz, mask):

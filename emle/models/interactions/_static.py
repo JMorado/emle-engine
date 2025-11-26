@@ -120,9 +120,7 @@ class StaticElectrostatic(BaseInteraction):
         """
         return self._forward_impl(*args, **kwargs)
 
-    def _forward_emle(
-        self, q_core, q_val, charges_mm, mesh_data, *args, **kwargs
-    ):
+    def _forward_emle(self, q_core, q_val, charges_mm, mesh_data, *args, **kwargs):
         """
         Calculate static energy with point charges for MM (no charge penetration).
 

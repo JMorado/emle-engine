@@ -76,7 +76,14 @@ class NullInteraction(BaseInteraction):
         for arg in args:
             if isinstance(arg, _torch.Tensor) and arg.ndim >= 1:
                 batch_size = arg.shape[0]
-                return _torch.zeros(batch_size, dtype=self._dtype, device=self._device, requires_grad=False)
+                return _torch.zeros(
+                    batch_size,
+                    dtype=self._dtype,
+                    device=self._device,
+                    requires_grad=False,
+                )
 
         # Fallback: scalar zero
-        return _torch.zeros(1, dtype=self._dtype, device=self._device, requires_grad=False)
+        return _torch.zeros(
+            1, dtype=self._dtype, device=self._device, requires_grad=False
+        )
