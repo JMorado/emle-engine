@@ -197,7 +197,10 @@ class EMLEBase(_torch.nn.Module):
         # self.a_Gauss = (
         #    _torch.nn.Parameter(params["a_Gauss"]) if "a_Gauss" in params else None
         # )
-        self.a_Gauss = _torch.nn.Parameter(params["a_QEq"])
+    
+        self.a_Gauss = _torch.nn.Parameter(
+            _torch.tensor(1.44, dtype=dtype, device=device)
+        )
         self.ref_values_s = _torch.nn.Parameter(params["ref_values_s"])
         self.ref_values_chi = _torch.nn.Parameter(params["ref_values_chi"])
         self.k_Z = _torch.nn.Parameter(params["k_Z"])
@@ -348,13 +351,13 @@ class EMLEBase(_torch.nn.Module):
         self._c_sqrtk = self._c_sqrtk.to(*args, **kwargs)
         self._c_c6 = self._c_c6.to(*args, **kwargs)
         self.k_Z = _torch.nn.Parameter(self.k_Z.to(*args, **kwargs))
-        self.c6_Z = _torch.nn.Parameter(self.c6_Z.to(*args, **kwargs))
-        self._A_exrep_mm = self._A_exrep_mm.to(*args, **kwargs)
-        self._A_sr_corr_mm = self._A_sr_corr_mm.to(*args, **kwargs)
-        self._s_mm = self._s_mm.to(*args, **kwargs)
-        self._A_exrep_qm = self._A_exrep_qm.to(*args, **kwargs)
-        self._A_sr_corr_qm = self._A_sr_corr_qm.to(*args, **kwargs)
-        self._q_core_mm = self._q_core_mm.to(*args, **kwargs)
+        # self.c6_Z = _torch.nn.Parameter(self.c6_Z.to(*args, **kwargs))
+        # self._A_exrep_mm = self._A_exrep_mm.to(*args, **kwargs)
+        # self._A_sr_corr_mm = self._A_sr_corr_mm.to(*args, **kwargs)
+        # self._s_mm = self._s_mm.to(*args, **kwargs)
+        # self._A_exrep_qm = self._A_exrep_qm.to(*args, **kwargs)
+        # self._A_sr_corr_qm = self._A_sr_corr_qm.to(*args, **kwargs)
+        # self._q_core_mm = self._q_core_mm.to(*args, **kwargs)
 
         # Check for a device type in args and update the device attribute.
         for arg in args:
@@ -534,12 +537,7 @@ class EMLEBase(_torch.nn.Module):
         s: torch.Tensor (N_BATCH, N_QM_ATOMS)
             MBIS valence shell widths.
         """
-        s, var = self._gpr(
-            aev, self._ref_mean_s, self._c_s, species_id, return_var=True
-        )
-        # TODO: DELETE THIS LATER
-        var_row = var.detach().cpu().numpy()
-        return s
+        return self._gpr(aev, self._ref_mean_s, self._c_s, species_id)
 
     def get_chi(self, aev, species_id):
         """
@@ -657,41 +655,11 @@ class EMLEBase(_torch.nn.Module):
 
         return self._get_A_thole(r_data, s, q_val, k, self.a_Thole)
 
-    def get_c6(self, species_id, aev, mask):
+
+    def forward(self, atomic_numbers, xyz_qm, q_total):
         """
-        Compute C6 dispersion coefficients using GPR.
-
-        Parameters
-        ----------
-
-        species_id: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            Species IDs.
-
-        aev: torch.Tensor (N_BATCH, N_QM_ATOMS, N_AEV)
-            Atomic environment vectors.
-
-        mask: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            Mask for valid atoms.
-
-        Returns
-        -------
-
-        c6: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            C6 dispersion coefficients.
-        """
-        if self.c6_Z is None:
-            return None
-
-        c6 = self.c6_Z[species_id] * mask
-        c6_scale = self._gpr(aev, self._ref_mean_c6, self._c_c6, species_id) ** 2
-        return c6_scale * c6
-
-    def forward(self, atomic_numbers, xyz_qm, q_total, calc_c6=False):
-        """
-        Compute the valence widths, core charges, valence charges, A_thole tensor, and optionally C6 coefficients.
-
-        This is a convenience method that calls the individual getter methods.
-        For more control, use the individual methods directly.
+        Compute the valence widths, core charges, valence charges, and
+        A_thole tensor for a batch of QM systems.
 
         Parameters
         ----------
@@ -705,34 +673,52 @@ class EMLEBase(_torch.nn.Module):
         q_total: torch.Tensor (N_BATCH,)
             Total charge.
 
-        calc_c6: bool
-            Whether to compute the C6 dispersion coefficients.
-
         Returns
         -------
 
         result: (torch.Tensor (N_BATCH, N_QM_ATOMS,),
                  torch.Tensor (N_BATCH, N_QM_ATOMS,),
                  torch.Tensor (N_BATCH, N_QM_ATOMS,),
-                 torch.Tensor (N_BATCH, N_QM_ATOMS * 3, N_QM_ATOMS * 3,),
-                 torch.Tensor (N_BATCH, N_QM_ATOMS,) or None)
-            Valence widths, core charges, valence charges, A_thole tensor, C6 coefficients
+                 torch.Tensor (N_BATCH, N_QM_ATOMS * 3, N_QM_ATOMS * 3,))
+            Valence widths, core charges, valence charges, A_thole tensor
         """
-        # Get AEVs.
-        mask, species_id, aev = self.get_aev_data(atomic_numbers, xyz_qm)
 
-        # Compute MBIS valence
-        s = self.get_s(aev, species_id)
-        chi = self.get_chi(aev, species_id)
-        q_core = self.get_q_core(species_id, mask)
-        q = self.get_q_val(xyz_qm, s, chi, q_total, mask)
+        # Mask for padded coordinates.
+        mask = atomic_numbers > 0
+
+        # Convert the atomic numbers to species IDs.
+        species_id = self._species_map[atomic_numbers]
+
+        # Compute the AEVs.
+        aev = self._emle_aev_computer(species_id, xyz_qm)
+
+        # Compute the MBIS valence shell widths.
+        s = self._gpr(aev, self._ref_mean_s, self._c_s, species_id)
+
+        # Compute the electronegativities.
+        chi = self._gpr(aev, self._ref_mean_chi, self._c_chi, species_id)
+
+        # Convert coordinates to Bohr.
+        ANGSTROM_TO_BOHR = 1.8897261258369282
+        xyz_qm_bohr = xyz_qm * ANGSTROM_TO_BOHR
+
+        r_data = self._get_r_data(xyz_qm_bohr, mask)
+
+        q_core = self._q_core[species_id] * mask
+        q = self._get_q(r_data, s, chi, q_total, mask)
         q_val = q - q_core
-        A_thole = self.get_A_thole(xyz_qm, s, q_val, species_id, aev, mask)
 
-        # Optionally compute C6
-        c6_coeffs = self.get_c6(species_id, aev, mask) if calc_c6 else None
+        k = self.k_Z[species_id]
 
-        return s, q_core, q_val, A_thole, c6_coeffs
+        if self._alpha_mode == "reference":
+            k_scale = (
+                self._gpr(aev, self._ref_mean_sqrtk, self._c_sqrtk, species_id) ** 2
+            )
+            k = k_scale * k
+
+        A_thole = self._get_A_thole(r_data, s, q_val, k, self.a_Thole)
+
+        return s, q_core, q_val, A_thole
 
     @classmethod
     def _get_Kinv(cls, ref_features, sigma):
@@ -803,8 +789,8 @@ class EMLEBase(_torch.nn.Module):
             zid.shape, dtype=mol_features.dtype, device=mol_features.device
         )
 
-        if return_var:
-            var = _torch.zeros_like(result)
+        #if return_var:
+        #     var = _torch.zeros_like(result)
 
         for i in range(len(self._n_ref)):
             n_ref = self._n_ref[i]
@@ -814,12 +800,12 @@ class EMLEBase(_torch.nn.Module):
             K_mol_ref2 = (mol_features_z @ ref_features_z.T) ** 2
             result[zid == i] = K_mol_ref2 @ c[i, :n_ref] + ref_mean[i]
 
-            if return_var:
-                K_inv = self._Kinv[i, :n_ref, :n_ref]
-                tmp = K_mol_ref2 @ K_inv
-                var[zid == i] = 1.0 - _torch.sum(tmp * K_mol_ref2, dim=1)
+            #if return_var:
+            #    K_inv = self._Kinv[i, :n_ref, :n_ref]
+            #    tmp = K_mol_ref2 @ K_inv
+            #    var[zid == i] = 1.0 - _torch.sum(tmp * K_mol_ref2, dim=1)
 
-        return result if not return_var else (result, var)
+        return result #if not return_var else (result, var)
 
     @classmethod
     def _get_r_data(cls, xyz, mask):
@@ -845,9 +831,7 @@ class EMLEBase(_torch.nn.Module):
 
         rr_mat = xyz[:, :, None, :] - xyz[:, None, :, :]
         r_mat = _torch.where(mask_mat, _torch.cdist(xyz, xyz), 0.0)
-        r_inv = _torch.zeros_like(r_mat)
-        mask = r_mat > 0
-        r_inv[mask] = 1.0 / r_mat[mask]
+        r_inv = _torch.where(r_mat == 0.0, 0.0, 1.0 / (r_mat + 1e-16))
 
         r_inv1 = r_inv.repeat_interleave(3, dim=2)
         r_inv2 = r_inv1.repeat_interleave(3, dim=1)
