@@ -113,7 +113,7 @@ class InducedElectrostatic(BaseInteraction):
     @staticmethod
     def _get_mu_ind(A, mesh_data, q, s, mask):
         """Calculate induced atomic dipoles."""
-        r = 1.0 / mesh_data[0]
+        # r = 1.0 / mesh_data[0]
         fields = _torch.sum(mesh_data[2] * q[:, None, :, None], dim=2).reshape(
             len(s), -1
         )

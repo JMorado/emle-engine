@@ -32,7 +32,7 @@ import torch as _torch
 from abc import ABC, abstractmethod
 
 
-class BaseInteraction(_torch.nn.Module, ABC):
+class BaseInteraction(ABC):
     """
     Abstract base class for all energy interaction modules.
 

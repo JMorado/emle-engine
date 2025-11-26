@@ -121,7 +121,7 @@ class StaticElectrostatic(BaseInteraction):
         return self._forward_impl(*args, **kwargs)
 
     def _forward_emle(
-        self, q_core, q_val, charges_mm, mesh_data, s_qm=None, idx_mm=None
+        self, q_core, q_val, charges_mm, mesh_data, *args, **kwargs
     ):
         """
         Calculate static energy with point charges for MM (no charge penetration).
@@ -208,15 +208,29 @@ class StaticElectrostatic(BaseInteraction):
         # Convert MBIS widths to Gaussian widths.
         sigma_qm = s_qm * self._emle_base.a_Gauss
         sigma_mm = self._emle_base._s_mm.gather(1, idx_mm) * self._emle_base.a_Gauss
-        s_mat = _torch.sqrt(sigma_qm[:, :, None] ** 2 + sigma_mm[:, None, :] ** 2)
+        # s_mat = _torch.sqrt(sigma_qm[:, None, :] ** 2 + sigma_mm[:, :, None] ** 2)
+        # s_mat_mask = (sigma_qm[:, :, None] > 0) & (sigma_mm[:, None, :] > 0)
+        # s_mat = s_mat * s_mat_mask
 
         # Get gaussian T0 tensor.
-        r = 1.0 / mesh_data[0]
+        rinv = mesh_data[0]
+        r = _torch.where(rinv > 0, 1.0 / rinv, _torch.zeros_like(rinv))
         q_qm = q_core + q_val
-        T0_cp = EMLEBase._get_T0_gaussian(1.0, r, s_mat)
+
+        # T0_cp = EMLEBase._get_T0_gaussian(1.0, r, s_mat)
+
+        sqrt2 = _torch.sqrt(_torch.tensor([2.0], dtype=r.dtype, device=r.device))
+        sigma_sum = _torch.sqrt(
+            sigma_qm[:, :, None] ** 2 + sigma_mm[:, None, :] ** 2 + 1e-16
+        )
+        T0_cp = _torch.where(
+            sigma_sum > 0,
+            _torch.erf(r / ((sigma_sum + 1e-16) * sqrt2)) / (r + 1e-16),
+            0.0,
+        )
 
         # Calculate electrostatic potential due to QM charges with Gaussian CP.
-        vpot_static = _torch.sum(T0_cp * q_qm[:, :, None], dim=1)
+        vpot_static = StaticElectrostatic._get_vpot_q(q_qm, T0_cp)
         return _torch.sum(vpot_static * charges_mm, dim=1)
 
     def _forward_slater(

@@ -57,7 +57,7 @@ class NullInteraction(BaseInteraction):
 
     def forward(self, *args, **kwargs):
         """
-        Always returns zero energy.
+        Always returns zero energy that does not contribute to gradients.
 
         Parameters
         ----------
@@ -69,13 +69,14 @@ class NullInteraction(BaseInteraction):
         -------
 
         E_zero: torch.Tensor
-            Zero energy tensor. Infers batch size from first tensor argument.
+            Zero energy tensor (detached from computational graph).
+            Infers batch size from first tensor argument.
         """
         # Infer batch size from first tensor argument
         for arg in args:
             if isinstance(arg, _torch.Tensor) and arg.ndim >= 1:
                 batch_size = arg.shape[0]
-                return _torch.zeros(batch_size, dtype=self._dtype, device=self._device)
+                return _torch.zeros(batch_size, dtype=self._dtype, device=self._device, requires_grad=False)
 
         # Fallback: scalar zero
-        return _torch.zeros(1, dtype=self._dtype, device=self._device)
+        return _torch.zeros(1, dtype=self._dtype, device=self._device, requires_grad=False)
