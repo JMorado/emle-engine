@@ -1552,11 +1552,8 @@ class EMLECalculator:
         force_qm: [[float, float, float]]
             The forces on the QM atoms in kJ/mol/nanometer.
 
-        force_mm: [[float, float, float]] Tuple[_torch.Tensor, _torch.Tensor]:
+        force_mm: [[float, float, float]]
             The forces on the MM atoms in kJ/mol/nanometer.
-                        else:
-                            delta_model = backend
-                    # This is a non-Torch backend.
         """
         # For performance, we assume that the input is already validated.
         # Convert to NumPy arrays.
