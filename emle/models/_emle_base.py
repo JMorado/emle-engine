@@ -1153,7 +1153,9 @@ class EMLEBase(_torch.nn.Module):
             erf_u = _torch.erf(u)
             exp_u2 = _torch.exp(-u * u)
 
-            factor = (erf_u - (2.0 / _torch.sqrt(_torch.pi)) * u * exp_u2) * (r_inv**3)
+            factor = (
+                erf_u - (2.0 / _torch.sqrt(_torch.tensor(_torch.pi))) * u * exp_u2
+            ) * (r_inv**3)
             E_mm_gauss = rr * factor[..., None]
 
         return (

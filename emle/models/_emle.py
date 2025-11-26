@@ -715,7 +715,14 @@ class EMLE(_torch.nn.Module):
 
         # Calculate all energy components using interaction modules.
         E_static = self._static(q_core, q_val, q_core_mm, q_val_mm, mesh_data, s, s_mm)
-        E_induced = self._induced(A_thole, self._charges_mm, s, mesh_data, mask)
+        E_induced = self._induced(
+            A_thole,
+            self._charges_mm,
+            s,
+            mesh_data,
+            mask,
+            self._static.cp_mode == "gaussian",
+        )
         E_exrep = self._exrep(A_exrep_qm, A_exrep_mm, q_val, q_val_mm, S)
         E_sr_corr = self._sr_corr(A_sr_corr_qm, A_sr_corr_mm, q_val, q_val_mm, S)
         E_disp = self._disp(c6, alpha_qm, epsilon_mm, sigma_mm, mesh_data, s, s_mm)

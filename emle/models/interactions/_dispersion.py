@@ -201,7 +201,7 @@ class Dispersion(BaseInteraction):
         epsilon = _torch.where(
             epsilon_product > 0, _torch.sqrt(epsilon_product + 1e-16), 0.0
         )
-        r_inv, _, _ = mesh_data
+        r_inv, *_ = mesh_data
         sigma_r_inv_6 = (sigma * r_inv) ** 6
         sigma_r_inv_12 = sigma_r_inv_6 * sigma_r_inv_6
         lj_energy = 4 * epsilon * (sigma_r_inv_12 - sigma_r_inv_6)
@@ -307,7 +307,7 @@ class Dispersion(BaseInteraction):
         E_disp: torch.Tensor (N_BATCH,)
             Total C6 dispersion energy in Hartree.
         """
-        r_inv, _, _ = mesh_data
+        r_inv, *_ = mesh_data
 
         # Tang-Toennies damping function of order 6
         x_damp = 1.0 / ((s_qm[:, :, None] + s_mm[:, None, :]) * r_inv * 0.5)
