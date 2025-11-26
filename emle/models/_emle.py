@@ -64,8 +64,8 @@ try:
 except:
     _has_nnpops = False
 
-_torch.autograd.set_detect_anomaly(True)
 
+# _torch.autograd.set_detect_anomaly(True)
 
 class EMLE(_torch.nn.Module):
     """
@@ -106,6 +106,7 @@ class EMLE(_torch.nn.Module):
         cp_mode: str = None,
         include_exrep: bool = False,
         include_sr_corr: bool = False,
+        *args, **kwargs
     ):
         """
         Constructor.
@@ -632,27 +633,27 @@ class EMLE(_torch.nn.Module):
             return _torch.zeros(
                 2, batch_size, dtype=self._xyz_qm.dtype, device=self._xyz_qm.device
             )
-
+       
         if idx_mm is not None:
-            if isinstance(idx_mm, (_np.ndarray, list, tuple)):
-                idx_mm = _torch.tensor(idx_mm, dtype=_torch.int64, device=self._device)
+            if not isinstance(idx_mm, _torch.Tensor):
+                idx_mm = _torch.as_tensor(idx_mm, dtype=_torch.int64, device=self._device)
             if idx_mm.ndim == 1:
-                idx_mm = idx_mm.repeat(batch_size, 1)
-            mask_mm = idx_mm > 0
-            max_n_mm_atoms = mask_mm.sum(dim=1).max()
+                idx_mm = idx_mm.unsqueeze(0)  
+            max_n_mm_atoms = (idx_mm > 0).sum(dim=1).max()
             self._charges_mm = self._charges_mm[:, :max_n_mm_atoms]
             self._xyz_mm = self._xyz_mm[:, :max_n_mm_atoms, :]
-
-        # Get the base data that's always needed
-        mask, species_id, aev = self._emle_base.get_aev_data(
-            self._atomic_numbers, self._xyz_qm
-        )
+       
+        # Get the base data.
+        #mask, species_id, aev = self._emle_base.get_aev_data(
+        #    self._atomic_numbers, self._xyz_qm
+        #)
 
         # Convert coordinates to Bohr (needed for r_data computation)
         ANGSTROM_TO_BOHR = 1.8897261258369282
         xyz_qm_bohr = self._xyz_qm * ANGSTROM_TO_BOHR
         xyz_mm_bohr = self._xyz_mm * ANGSTROM_TO_BOHR
 
+        """
         # Compute properties required by several interactions.
         r_data = self._emle_base._get_r_data(xyz_qm_bohr, mask)
         s = self._emle_base.get_s(aev, species_id)
@@ -667,35 +668,19 @@ class EMLE(_torch.nn.Module):
             if self._method == "electrostatic"
             else None
         )
+        """
+        s, q_core, q_val, A_thole = self._emle_base.forward(self._atomic_numbers, self._xyz_qm, qm_charge)
 
         # Create mesh data for interactions.
+        mask = self._atomic_numbers > 0
         mask_3d = mask.unsqueeze(-1)
         mesh_data = self._emle_base._get_mesh_data(xyz_qm_bohr, xyz_mm_bohr, s, mask_3d)
 
         # Calculate all energy components using interaction modules.
-        E_static = self._static(q_core, q_val, self._charges_mm, mesh_data, s, idx_mm)
-        E_induced = self._induced(A_thole, self._charges_mm, s, mesh_data, mask_3d)
-
+        E_static = self._static.forward(q_core, q_val, self._charges_mm, mesh_data, s, idx_mm)
+        E_induced = self._induced.forward(A_thole, self._charges_mm, s, mesh_data, mask_3d)
         E_exrep = self._exrep(q_val, self._charges_mm, mesh_data, s, idx_mm)
         E_sr_corr = self._sr_corr(q_val, self._charges_mm, mesh_data, s, idx_mm)
-        E_disp = self._disp(
-            species_id,
-            aev,
-            q_val,
-            self._xyz_qm,
-            s,
-            self._charges_mm,
-            mesh_data,
-            mask,
-            idx_mm,
-            r_data=r_data,
-        )
-
-        # Debug print if in electrostatic or nonpol mode
-        # print(
-        #    self._method,
-        #    f"EMLE static: {E_static.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
-        #    f"induced: {E_induced.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, ",
-        # )
+        E_disp = self._disp()
 
         return _torch.stack((E_static, E_induced, E_exrep, E_sr_corr, E_disp), dim=0)
