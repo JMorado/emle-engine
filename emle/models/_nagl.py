@@ -225,6 +225,7 @@ class NAGLEMLE(_torch.nn.Module):
             The path to the file from which the model will be loaded.
         """
         self._gnn_model = GNNModel.load(filepath)
+        return self
 
     def forward(self, batch):
         preds = self._gnn_model.forward(batch.to(self._gnn_model.device))
