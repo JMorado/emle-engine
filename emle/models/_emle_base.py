@@ -985,7 +985,6 @@ class EMLEBase(_torch.nn.Module):
             u = r / s_mm[:, None, :]
             erf_u = _torch.erf(u)
             exp_u2 = _torch.exp(-u * u)
-
             factor = (
                 erf_u - (2.0 / _torch.sqrt(_torch.tensor(_torch.pi))) * u * exp_u2
             ) * (r_inv**3)
@@ -995,7 +994,7 @@ class EMLEBase(_torch.nn.Module):
             r_inv,
             T0_slater,
             -rr * r_inv[..., None] ** 3,
-            E_mm_gauss if s_mm is not None else None,
+            -E_mm_gauss if s_mm is not None else None,
         )
 
     @staticmethod

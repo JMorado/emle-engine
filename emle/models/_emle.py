@@ -672,13 +672,15 @@ class EMLE(_torch.nn.Module):
         # Data for extractions.
         if self._calc_s_mm:
             s_mm = self._emle_base._s_mm.gather(1, idx_mm)
+            sigma_mm = s_mm * self._emle_base.a_Gauss
         else:
             s_mm = None
+            sigma_mm = None
 
         # Create mesh data for interactions.
         mask = (self._atomic_numbers > 0).unsqueeze(-1)
         mesh_data = self._emle_base._get_mesh_data(
-            xyz_qm_bohr, xyz_mm_bohr, s, mask, s_mm
+            xyz_qm_bohr, xyz_mm_bohr, s, mask, sigma_mm
         )
 
         if self._calc_overlap:
@@ -727,8 +729,7 @@ class EMLE(_torch.nn.Module):
         E_sr_corr = self._sr_corr(A_sr_corr_qm, A_sr_corr_mm, q_val, q_val_mm, S)
         E_disp = self._disp(c6, alpha_qm, epsilon_mm, sigma_mm, mesh_data, s, s_mm)
 
-        """
-        if self._method in ["electrostatic", "nonpol"]:
+        if True:
             print(
                 f"EMLE static: {E_static.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
                 f"induced: {E_induced.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
@@ -736,6 +737,5 @@ class EMLE(_torch.nn.Module):
                 f"short-range corr: {E_sr_corr.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
                 f"dispersion: {E_disp.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol"
             )
-        """
 
         return _torch.stack((E_static, E_induced, E_exrep, E_sr_corr, E_disp), dim=0)
