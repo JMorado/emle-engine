@@ -655,7 +655,9 @@ class EMLEBase(_torch.nn.Module):
 
         return self._get_A_thole(r_data, s, q_val, k, self.a_Thole)
 
-    def forward(self, atomic_numbers, xyz_qm, q_total):
+    def forward(
+        self, atomic_numbers, xyz_qm, q_total, calc_A_thole=True, calc_c6=False
+    ):
         """
         Compute the valence widths, core charges, valence charges, and
         A_thole tensor for a batch of QM systems.
@@ -671,6 +673,12 @@ class EMLEBase(_torch.nn.Module):
 
         q_total: torch.Tensor (N_BATCH,)
             Total charge.
+
+        calc_A_thole: bool
+            Whether to compute the A_thole tensor.
+
+        calc_c6: bool
+            Whether to compute C6 dispersion coefficients.
 
         Returns
         -------
@@ -707,17 +715,27 @@ class EMLEBase(_torch.nn.Module):
         q = self._get_q(r_data, s, chi, q_total, mask)
         q_val = q - q_core
 
-        k = self.k_Z[species_id]
+        if calc_A_thole:
+            k = self.k_Z[species_id]
 
-        if self._alpha_mode == "reference":
-            k_scale = (
-                self._gpr(aev, self._ref_mean_sqrtk, self._c_sqrtk, species_id) ** 2
-            )
-            k = k_scale * k
+            if self._alpha_mode == "reference":
+                k_scale = (
+                    self._gpr(aev, self._ref_mean_sqrtk, self._c_sqrtk, species_id) ** 2
+                )
+                k = k_scale * k
 
-        A_thole = self._get_A_thole(r_data, s, q_val, k, self.a_Thole)
+            A_thole = self._get_A_thole(r_data, s, q_val, k, self.a_Thole)
+        else:
+            A_thole = None
 
-        return s, q_core, q_val, A_thole
+        if calc_c6:
+            c6 = self.c6_Z[species_id]
+            c6_gpr = self._gpr(aev, self._ref_mean_c6, self._c_c6, species_id)
+            c6 = c6_gpr
+        else:
+            c6 = None
+
+        return s, q_core, q_val, A_thole, c6
 
     @classmethod
     def _get_Kinv(cls, ref_features, sigma):
@@ -1174,3 +1192,77 @@ class EMLEBase(_torch.nn.Module):
         return (1 - (1 + r / (s * 2 + 1e-16)) * _torch.exp(-r / (s + 1e-16))) / (
             r + 1e-16
         )
+
+    @staticmethod
+    def _get_slater_overlap(s_qm, s_mm, r):
+        """
+        Internal method to compute the overlap integral between two Slater-type charge distributions.
+
+        The overlap integral measures the spatial overlap between two exponentially decaying
+        charge distributions (Slater functions). This is used to compute short-range corrections
+        such as exchange-repulsion and penetration effects.
+
+        Parameters
+        ----------
+
+        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS) or (N_BATCH, N_QM_ATOMS, 1)
+            MBIS valence shell widths for QM atoms in Bohr.
+
+        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS) or (N_BATCH, 1, N_MM_ATOMS)
+            Slater widths for MM atoms in Bohr.
+
+        r: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
+            Distance matrix between QM and MM atoms in Bohr.
+
+        Returns
+        -------
+
+        result: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
+            Overlap integrals S_{ij} between Slater functions i and j.
+        """
+
+        def h_diff(si, sj, r):
+            """Overlap between Slater functions with different widths."""
+            s_diff = sj**2 - si**2
+            term1 = 4 * si**2 * sj**2 / (s_diff**3 + 1e-16)
+            term2 = (si * r) / (s_diff**2 + 1e-16)
+            return (term1 + term2) * _torch.exp(-r / (si + 1e-16))
+
+        def h_same(si, sj, r):
+            """Overlap between Slater functions with the same widths."""
+            s_diff = sj - si
+            x = r / (si + 1e-16)
+            exp_x = _torch.exp(-x)
+            term1 = 1 / (192 * _torch.pi * si**3 + 1e-16) * (3 + 3 * x + x**2) * exp_x
+            term2 = (
+                s_diff / (384 * si**4 + 1e-16) * (-9 - 9 * x - 2 * x**2 + x**3) * exp_x
+            )
+            term3 = (
+                s_diff**2
+                / (3840 * si**5 + 1e-16)
+                * (90 + 90 * x + 5 * x**2 - 25 * x**3 + 3 * x**4)
+                * exp_x
+            )
+            return term1 + term2 + term3
+
+        s_qm_exp = s_qm.unsqueeze(-1).expand(-1, -1, s_mm.size(1))
+        s_mm_exp = s_mm.unsqueeze(1).expand(-1, s_qm.size(1), -1)
+        mask_s = (s_qm_exp > 0) & (s_mm_exp > 0)
+        S = _torch.zeros_like(r)
+        equal_mask = _torch.abs(s_qm_exp - s_mm_exp) < 1e-2
+        diff_mask = ~equal_mask
+        if equal_mask.any():
+            si_eq = s_qm_exp[equal_mask]
+            sj_eq = s_mm_exp[equal_mask]
+            r_eq = r[equal_mask]
+            S[equal_mask] = h_same(si_eq, sj_eq, r_eq)
+
+        if diff_mask.any():
+            si_diff = s_qm_exp[diff_mask]
+            sj_diff = s_mm_exp[diff_mask]
+            r_diff = r[diff_mask]
+            S[diff_mask] = (
+                h_diff(si_diff, sj_diff, r_diff) + h_diff(sj_diff, si_diff, r_diff)
+            ) / (8 * _torch.pi * r_diff + 1e-16)
+
+        return S * mask_s

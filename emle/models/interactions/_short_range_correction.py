@@ -59,64 +59,22 @@ class ShortRangeCorrection(BaseInteraction):
 
         self._emle_base = emle_base
 
-    def forward(self, q_val, charges_mm, mesh_data, s, idx_mm=None):
+    def forward(self, A_sr_corr_qm, A_sr_corr_mm, q_val_qm, q_val_mm, S):
         """
-        Calculate short-range correction energy.
+        Calculate the exchange-repulsion energy between QM and MM valence Slater charge distributions.
+
+        This computes the Pauli repulsion between QM and MM electron densities, which arises
+        from the Pauli exclusion principle. The energy is proportional to the overlap between
+        the valence charge distributions.
 
         Parameters
         ----------
 
-        q_val: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            QM valence charges.
-
-        charges_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            MM charges in atomic units.
-
-        mesh_data: tuple
-            Mesh data from EMLEBase._get_mesh_data.
-
-        s: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            QM valence shell widths.
-
-        idx_mm: torch.Tensor (N_BATCH, N_MM_ATOMS), optional
-            Indices for selecting MM parameters from NAGL model.
-
-        Returns
-        -------
-
-        E_sr_corr: torch.Tensor (N_BATCH,)
-            Short-range correction energy in Hartree.
-        """
-        # TODO: Implement proper parameter retrieval
-        # For now, return zero
-        return _torch.zeros(q_val.shape[0], dtype=q_val.dtype, device=q_val.device)
-
-    @staticmethod
-    def get_sr_corr_energy(
-        A_short_range_corr_qm,
-        A_short_range_corr_mm,
-        q_val_qm,
-        q_val_mm,
-        mesh_data,
-        s_qm,
-        s_mm,
-        S=None,
-    ):
-        """
-        Calculate the short-range correction energy between QM and MM valence Slater charge distributions.
-
-        This corrects for short-range errors in the electrostatic embedding arising from the
-        point charge approximation. The functional form is identical to the exchange-repulsion
-        energy but with opposite sign and different parameters.
-
-        Parameters
-        ----------
-
-        A_short_range_corr_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+        A_sr_corr_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
             Short-range correction parameters for QM atoms in Hartree.
 
-        A_short_range_corr_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            Short-range correction parameters for MM atoms in Hartree.
+        A_sr_corr_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Short-range-correction parameters for MM atoms in Hartree.
 
         q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
             QM valence charges in atomic units.
@@ -124,47 +82,15 @@ class ShortRangeCorrection(BaseInteraction):
         q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
             MM valence charges in atomic units.
 
-        mesh_data: tuple of torch.Tensor
-            Mesh data object from EMLEBase._get_mesh_data.
-            Contains (r_inv, T0_slater, T1) where:
-                r_inv: (N_BATCH, N_QM_ATOMS, N_MM_ATOMS) - inverse distances
-                T0_slater: (N_BATCH, N_QM_ATOMS, N_MM_ATOMS) - T0 tensor for Slater
-                T1: (N_BATCH, N_QM_ATOMS, N_MM_ATOMS, 3) - T1 tensor for dipoles
-
-        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            MBIS valence shell widths for QM atoms in Bohr.
-
-        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            Slater widths for MM atoms in Bohr.
-
-        S: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS), optional
-            Precomputed Slater overlap integrals.
-            If None, they will be computed.
+        S: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
+            Overlap integrals between QM and MM valence Slater charge distributions.
 
         Returns
         -------
 
         result: torch.Tensor (N_BATCH,)
-            Short-range correction energy in Hartree.
-
-        Notes
-        -----
-
-        The short-range correction energy is computed as:
-        E_sr_corr = -sum_{i,j} A_{ij} * S_{ij}
-
-        where A_{ij} = A_sr_corr_qm[i] * A_sr_corr_mm[j] and S_{ij} is the overlap integral
-        between Slater functions centered on atoms i and j. The negative sign distinguishes
-        this from the exchange-repulsion term.
+            Exchange-repulsion energy in Hartree.
         """
-        mask_s = (s_qm > 0)[:, :, None] & (s_mm > 0)[:, None, :]
-        A_short_range_corr = (
-            A_short_range_corr_qm[:, :, None] * A_short_range_corr_mm[:, None, :]
-        )
-        r = _torch.where(mesh_data[0] > 0, 1.0 / (mesh_data[0] + 1e-16), 0.0)
-        # Import to access _get_slater_overlap
-        from ._exchange_repulsion import ExchangeRepulsion
-
-        S = ExchangeRepulsion._get_slater_overlap(s_qm, s_mm, r) if S is None else S
-        q_prod = q_val_qm[:, :, None] * q_val_mm[:, None, :]
-        return -_torch.sum(S * A_short_range_corr * mask_s, dim=(1, 2))
+        A_sr_corr = A_sr_corr_qm[:, :, None] * A_sr_corr_mm[:, None, :]
+        q_prod = 1  # q_val_qm[:, :, None] * q_val_mm[:, None, :]
+        return _torch.sum(q_prod * S * A_sr_corr, dim=(1, 2))

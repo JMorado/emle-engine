@@ -475,6 +475,16 @@ class EMLE(_torch.nn.Module):
             self._sr_corr = NullInteraction(device=device, dtype=dtype)
             self._disp = NullInteraction(device=device, dtype=dtype)
 
+        self._calc_overlap = (
+            True if include_exrep or include_sr_corr or cp_mode == "slater" else False
+        )
+        self._calc_s_mm = (
+            True
+            if include_exrep or include_sr_corr or cp_mode in ["slater", "gaussian"]
+            else False
+        )
+        self._dispersion_mode = dispersion_mode
+
         self._alpha_mode = alpha_mode
 
     def to(self, *args, **kwargs):
@@ -484,7 +494,6 @@ class EMLE(_torch.nn.Module):
         self._q_core_mm = self._q_core_mm.to(*args, **kwargs)
         self._emle_base = self._emle_base.to(*args, **kwargs)
 
-        # Move interaction modules
         self._static = self._static.to(*args, **kwargs)
         self._induced = self._induced.to(*args, **kwargs)
         self._exrep = self._exrep.to(*args, **kwargs)
@@ -647,17 +656,17 @@ class EMLE(_torch.nn.Module):
             self._charges_mm = self._charges_mm[:, :max_n_mm_atoms]
             self._xyz_mm = self._xyz_mm[:, :max_n_mm_atoms, :]
 
-        # Get the base data.
-        # mask, species_id, aev = self._emle_base.get_aev_data(
-        #    self._atomic_numbers, self._xyz_qm
-        # )
-
         # Convert coordinates to Bohr (needed for r_data computation)
         ANGSTROM_TO_BOHR = 1.8897261258369282
         xyz_qm_bohr = self._xyz_qm * ANGSTROM_TO_BOHR
         xyz_mm_bohr = self._xyz_mm * ANGSTROM_TO_BOHR
 
         """
+        Get the base data.
+        mask, species_id, aev = self._emle_base.get_aev_data(
+           self._atomic_numbers, self._xyz_qm
+        )
+
         # Compute properties required by several interactions.
         r_data = self._emle_base._get_r_data(xyz_qm_bohr, mask)
         s = self._emle_base.get_s(aev, species_id)
@@ -673,20 +682,62 @@ class EMLE(_torch.nn.Module):
             else None
         )
         """
-        s, q_core, q_val, A_thole = self._emle_base.forward(
+        s, q_core, q_val, A_thole, c6 = self._emle_base.forward(
             self._atomic_numbers, self._xyz_qm, qm_charge
         )
 
         # Create mesh data for interactions.
-        mask = self._atomic_numbers > 0
-        mask_3d = mask.unsqueeze(-1)
+        mask_3d = (self._atomic_numbers > 0).unsqueeze(-1)
         mesh_data = self._emle_base._get_mesh_data(xyz_qm_bohr, xyz_mm_bohr, s, mask_3d)
 
+        # Data for extractions.
+        if self._calc_s_mm:
+            s_mm = self._emle_base._s_mm.gather(1, idx_mm)
+        else:
+            s_mm = None
+
+        if self._calc_overlap:
+            r = _torch.where(mesh_data[0] > 0, 1.0 / (mesh_data[0] + 1e-16), 0.0)
+            S = self._emle_base._get_slater_overlap(s, s_mm, r)
+
+            # QM parameters.
+            A_exrep_qm = self._emle_base._A_exrep_qm.expand(batch_size, -1)
+            A_sr_corr_qm = self._emle_base._A_sr_corr_qm.expand(batch_size, -1)
+
+            # MM parameters.
+            A_sr_corr_mm = self._emle_base._A_sr_corr_mm.gather(1, idx_mm)
+            A_exrep_mm = self._emle_base._A_exrep_mm.gather(1, idx_mm)
+            q_core_mm = self._emle_base._q_core_mm.gather(1, idx_mm)
+            q_val_mm = self._charges_mm - q_core_mm
+        else:
+            S = None
+            A_exrep_qm = None
+            A_sr_corr_qm = None
+            A_exrep_mm = None
+            A_sr_corr_mm = None
+            q_val_mm = None
+            q_core_mm = self._charges_mm
+
+        # Compute the dispersion or LJ energy.
+        if self._method in ["electrostatic", "nonpol"] and self._dispersion_mode:
+            sigma_mm = self._emle_base._lj_sigma_mm.gather(1, idx_mm)
+            epsilon_mm = self._emle_base._lj_eps_mm.gather(1, idx_mm)
+            alpha_qm = self._emle_base.get_isotropic_polarizabilities(A_thole)
+
         # Calculate all energy components using interaction modules.
-        E_static = self._static(q_core, q_val, self._charges_mm, mesh_data, s, idx_mm)
+        E_static = self._static(q_core, q_val, q_core_mm, q_val_mm, mesh_data, s, s_mm)
         E_induced = self._induced(A_thole, self._charges_mm, s, mesh_data, mask_3d)
-        E_exrep = self._exrep(q_val, self._charges_mm, mesh_data, s, idx_mm)
-        E_sr_corr = self._sr_corr(q_val, self._charges_mm, mesh_data, s, idx_mm)
-        E_disp = self._disp()
+        E_exrep = self._exrep(A_exrep_qm, A_exrep_mm, q_val, q_val_mm, S)
+        E_sr_corr = self._sr_corr(A_sr_corr_qm, A_sr_corr_mm, q_val, q_val_mm, S)
+        E_disp = self._disp(c6, alpha_qm, epsilon_mm, sigma_mm, mesh_data, s, s_mm)
+
+        if self._method in ["electrostatic", "nonpol"]:
+            print(
+                f"EMLE static: {E_static.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                f"induced: {E_induced.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                f"exrep: {E_exrep.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                f"short-range corr: {E_sr_corr.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                f"dispersion: {E_disp.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol"
+            )
 
         return _torch.stack((E_static, E_induced, E_exrep, E_sr_corr, E_disp), dim=0)
