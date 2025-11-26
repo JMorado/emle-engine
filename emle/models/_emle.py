@@ -661,40 +661,25 @@ class EMLE(_torch.nn.Module):
         xyz_qm_bohr = self._xyz_qm * ANGSTROM_TO_BOHR
         xyz_mm_bohr = self._xyz_mm * ANGSTROM_TO_BOHR
 
-        """
-        Get the base data.
-        mask, species_id, aev = self._emle_base.get_aev_data(
-           self._atomic_numbers, self._xyz_qm
-        )
-
-        # Compute properties required by several interactions.
-        r_data = self._emle_base._get_r_data(xyz_qm_bohr, mask)
-        s = self._emle_base.get_s(aev, species_id)
-        chi = self._emle_base.get_chi(aev, species_id)
-        q_core = self._emle_base.get_q_core(species_id, mask)
-        q = self._emle_base.get_q_val(s, chi, qm_charge, r_data, mask)
-        q_val = q - q_core
-        A_thole = (
-            self._emle_base.get_A_thole(
-                xyz_qm_bohr, s, q_val, species_id, aev, mask.squeeze(-1), r_data
-            )
-            if self._method == "electrostatic"
-            else None
-        )
-        """
         s, q_core, q_val, A_thole, c6 = self._emle_base.forward(
-            self._atomic_numbers, self._xyz_qm, qm_charge
+            self._atomic_numbers,
+            self._xyz_qm,
+            qm_charge,
+            calc_A_thole=(self._method == "electrostatic"),
+            calc_c6=(self._dispersion_mode is not None),
         )
-
-        # Create mesh data for interactions.
-        mask_3d = (self._atomic_numbers > 0).unsqueeze(-1)
-        mesh_data = self._emle_base._get_mesh_data(xyz_qm_bohr, xyz_mm_bohr, s, mask_3d)
 
         # Data for extractions.
         if self._calc_s_mm:
             s_mm = self._emle_base._s_mm.gather(1, idx_mm)
         else:
             s_mm = None
+
+        # Create mesh data for interactions.
+        mask = (self._atomic_numbers > 0).unsqueeze(-1)
+        mesh_data = self._emle_base._get_mesh_data(
+            xyz_qm_bohr, xyz_mm_bohr, s, mask, s_mm
+        )
 
         if self._calc_overlap:
             r = _torch.where(mesh_data[0] > 0, 1.0 / (mesh_data[0] + 1e-16), 0.0)
@@ -723,14 +708,19 @@ class EMLE(_torch.nn.Module):
             sigma_mm = self._emle_base._lj_sigma_mm.gather(1, idx_mm)
             epsilon_mm = self._emle_base._lj_eps_mm.gather(1, idx_mm)
             alpha_qm = self._emle_base.get_isotropic_polarizabilities(A_thole)
+        else:
+            sigma_mm = None
+            epsilon_mm = None
+            alpha_qm = None
 
         # Calculate all energy components using interaction modules.
         E_static = self._static(q_core, q_val, q_core_mm, q_val_mm, mesh_data, s, s_mm)
-        E_induced = self._induced(A_thole, self._charges_mm, s, mesh_data, mask_3d)
+        E_induced = self._induced(A_thole, self._charges_mm, s, mesh_data, mask)
         E_exrep = self._exrep(A_exrep_qm, A_exrep_mm, q_val, q_val_mm, S)
         E_sr_corr = self._sr_corr(A_sr_corr_qm, A_sr_corr_mm, q_val, q_val_mm, S)
         E_disp = self._disp(c6, alpha_qm, epsilon_mm, sigma_mm, mesh_data, s, s_mm)
 
+        """
         if self._method in ["electrostatic", "nonpol"]:
             print(
                 f"EMLE static: {E_static.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
@@ -739,5 +729,6 @@ class EMLE(_torch.nn.Module):
                 f"short-range corr: {E_sr_corr.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
                 f"dispersion: {E_disp.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol"
             )
+        """
 
         return _torch.stack((E_static, E_induced, E_exrep, E_sr_corr, E_disp), dim=0)

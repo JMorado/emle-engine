@@ -75,9 +75,9 @@ class Dispersion(BaseInteraction):
             raise ValueError("'mode' must be 'lj' or 'c6'")
 
         if mode == "lj":
-            self.forward = self._forward_lj
+            self._forward_impl = self._forward_lj
         elif mode == "c6":
-            self.forward = self._forward_c6
+            self._forward_impl = self._forward_c6
         else:
             raise ValueError(f"Unknown dispersion mode: {mode}")
 
@@ -126,7 +126,30 @@ class Dispersion(BaseInteraction):
 
     @staticmethod
     def _get_lj_parameters(c6, alpha):
-        """Calculate LJ sigma and epsilon from c6 and polarizabilities."""
+        """
+        Calculate Lennard-Jones sigma and epsilon parameters from C6 and polarizabilities.
+
+        Uses empirical relationships to convert C6 dispersion coefficients and
+        polarizabilities into Lennard-Jones parameters.
+
+        Parameters
+        ----------
+
+        c6: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            C6 dispersion coefficients.
+
+        alpha: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Isotropic polarizabilities.
+
+        Returns
+        -------
+
+        sigma: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Lennard-Jones sigma parameter (distance at which potential is zero).
+
+        epsilon: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Lennard-Jones epsilon parameter (depth of potential well).
+        """
         radius = 2.54 * alpha ** (1.0 / 7.0)
         rmin = 2 * radius
         sigma = rmin / (2 ** (1.0 / 6.0))
@@ -135,7 +158,40 @@ class Dispersion(BaseInteraction):
 
     @staticmethod
     def _get_lj_energy(sigma_qm, epsilon_qm, sigma_mm, epsilon_mm, mesh_data):
-        """Calculate Lennard-Jones energy."""
+        """
+        Calculate Lennard-Jones 12-6 energy between QM and MM atoms.
+
+        Uses the standard Lennard-Jones potential:
+        E_LJ = 4 * epsilon * [(sigma/r)^12 - (sigma/r)^6]
+
+        Lorentz-Berthelot combining rules are applied to mix QM and MM parameters:
+        - sigma_mix = (sigma_i + sigma_j) / 2
+        - epsilon_mix = sqrt(epsilon_i * epsilon_j)
+
+        Parameters
+        ----------
+
+        sigma_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Lennard-Jones sigma parameters for QM atoms.
+
+        epsilon_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            Lennard-Jones epsilon parameters for QM atoms.
+
+        sigma_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Lennard-Jones sigma parameters for MM atoms.
+
+        epsilon_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Lennard-Jones epsilon parameters for MM atoms.
+
+        mesh_data: tuple
+            Mesh data tuple (r_inv, T0, T1) from EMLEBase._get_mesh_data.
+
+        Returns
+        -------
+
+        E_lj: torch.Tensor (N_BATCH,)
+            Total Lennard-Jones energy in Hartree.
+        """
         # Lorentz-Berthelot combining rules
         sigma = 0.5 * (sigma_qm[:, :, None] + sigma_mm[:, None, :])
         epsilon_product = epsilon_qm[:, :, None] * epsilon_mm[:, None, :]
@@ -155,6 +211,8 @@ class Dispersion(BaseInteraction):
         epsilon_mm,
         sigma_mm,
         mesh_data,
+        s_qm,
+        s_mm,
     ):
         """
         Calculate C6/R^6 dispersion energy with Tang-Toennies damping.
@@ -189,14 +247,63 @@ class Dispersion(BaseInteraction):
         E_disp: torch.Tensor (N_BATCH,)
             Lennard-Jones energy in Hartree.
         """
+        print(
+            "Shape c6_qm before:", c6_qm.shape, "Shape alpha_qm before:", alpha_qm.shape
+        )
         c6_qm = 0.5 * c6_qm * alpha_qm
         c6_mm = 4 * epsilon_mm * sigma_mm**6.0
-        return self._get_dispersion_energy(c6_qm, c6_mm, alpha_qm, sigma_mm, mesh_data)
+        print(
+            "Shape c6_mm:",
+            c6_mm.shape,
+            "Shape c6_qm:",
+            c6_qm.shape,
+            "Shape s_qm:",
+            s_qm.shape,
+            "Shape s_mm:",
+            s_mm.shape,
+            "Shape mesh_data[0]:",
+            mesh_data[0].shape,
+        )
+        return self._get_dispersion_energy(c6_qm, c6_mm, s_qm, s_mm, mesh_data)
 
     @staticmethod
     def _get_dispersion_energy(c6_qm, c6_mm, s_qm, s_mm, mesh_data):
-        """Calculate C6 dispersion energy with Tang-Toennies damping."""
+        """
+        Calculate C6/R^6 dispersion energy with Tang-Toennies damping.
 
+        Implements the dispersion interaction:
+        E_disp = -C6 / R^6 * f_damp(R)
+
+        where f_damp is the Tang-Toennies damping function of order 6:
+        f_6(x) = 1 - exp(-x) * sum_{k=0}^{6} (x^k / k!)
+
+        The damping prevents unphysical behavior at short range by using
+        MBIS valence widths to define the damping length scale.
+
+        Parameters
+        ----------
+
+        c6_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            C6 dispersion coefficients for QM atoms.
+
+        c6_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            C6 dispersion coefficients for MM atoms.
+
+        s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            MBIS valence shell widths for QM atoms (used for damping).
+
+        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            MBIS valence shell widths for MM atoms (used for damping).
+
+        mesh_data: tuple
+            Mesh data tuple (r_inv, T0, T1) from EMLEBase._get_mesh_data.
+
+        Returns
+        -------
+
+        E_disp: torch.Tensor (N_BATCH,)
+            Total C6 dispersion energy in Hartree.
+        """
         r_inv, _, _ = mesh_data
 
         # Tang-Toennies damping function of order 6

@@ -27,12 +27,13 @@ __email__ = "kzinovjev@gmail.com"
 
 __all__ = ["EMLEBase"]
 
+import math
 import numpy as _np
 
 import torch as _torch
 
 from torch import Tensor
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torchani as _torchani
 
@@ -1107,7 +1108,11 @@ class EMLEBase(_torch.nn.Module):
 
     @staticmethod
     def _get_mesh_data(
-        xyz: Tensor, xyz_mesh: Tensor, s: Tensor, mask: Tensor
+        xyz: Tensor,
+        xyz_mesh: Tensor,
+        s: Tensor,
+        mask: Tensor,
+        s_mm: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """
         Internal method, calculates mesh_data object.
@@ -1127,6 +1132,9 @@ class EMLEBase(_torch.nn.Module):
         mask: torch.Tensor (N_BATCH, MAX_QM_ATOMS)
             Mask for padded coordinates.
 
+        s_mm: torch.Tensor (N_BATCH, MAX_MM_ATOMS,), optional
+            Gaussian widths for MM atoms.
+
         Returns
         -------
 
@@ -1140,10 +1148,19 @@ class EMLEBase(_torch.nn.Module):
         r_inv = _torch.where(mask, 1.0 / r, 0.0)
         T0_slater = _torch.where(mask, EMLEBase._get_T0_slater(r, s[:, :, None]), 0.0)
 
+        if s_mm is not None:
+            u = r / s_mm[:, None, :]
+            erf_u = _torch.erf(u)
+            exp_u2 = _torch.exp(-u * u)
+
+            factor = (erf_u - (2.0 / _torch.sqrt(_torch.pi)) * u * exp_u2) * (r_inv**3)
+            E_mm_gauss = rr * factor[..., None]
+
         return (
             r_inv,
             T0_slater,
             -rr * r_inv[..., None] ** 3,
+            E_mm_gauss if s_mm is not None else None,
         )
 
     @staticmethod
@@ -1266,3 +1283,30 @@ class EMLEBase(_torch.nn.Module):
             ) / (8 * _torch.pi * r_diff + 1e-16)
 
         return S * mask_s
+
+    def get_isotropic_polarizabilities(
+        self, A_thole: _torch.Tensor, mask: Optional[_torch.Tensor] = None
+    ) -> _torch.Tensor:
+        """
+        Compute isotropic polarizabilities.
+
+        Parameters
+        ----------
+        A_thole : torch.Tensor
+            Full polarizability tensor. Shape: (3N, 3N) or (B, 3N, 3N).
+
+        Returns
+        -------
+        torch.Tensor
+            Isotropic polarizabilities alpha per atom. Shape: (N,) or (B, N).
+        """
+        batch, dim, _ = A_thole.shape
+        n_atoms = dim // 3
+        Ainv = _torch.linalg.inv(A_thole)
+        Ainv_blocks = Ainv.reshape(batch, n_atoms, 3, n_atoms, 3)
+        block_traces = _torch.diagonal(Ainv_blocks, dim1=2, dim2=4)
+        block_traces = block_traces.sum(dim=-1)
+        per_atom = block_traces.sum(dim=-1) / 3.0
+        if mask is not None:
+            per_atom = per_atom * mask
+        return per_atom

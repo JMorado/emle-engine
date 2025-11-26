@@ -29,10 +29,9 @@ __email__ = "joaomorado@gmail.com"
 __all__ = ["BaseInteraction"]
 
 import torch as _torch
-from abc import ABC, abstractmethod
 
 
-class BaseInteraction(_torch.nn.Module, ABC):
+class BaseInteraction(_torch.nn.Module):
     """
     Abstract base class for all energy interaction modules.
 
@@ -64,11 +63,8 @@ class BaseInteraction(_torch.nn.Module, ABC):
         self._device = device
         self._dtype = dtype
 
-    @abstractmethod
     def forward(self, *args, **kwargs):
         """
-        Calculate the energy for this interaction.
-
-        Must be implemented by subclasses.
+        Dispatch to the appropriate implementation.
         """
-        pass
+        return self._forward_impl(*args, **kwargs)

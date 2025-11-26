@@ -111,15 +111,6 @@ class StaticElectrostatic(BaseInteraction):
         else:
             raise NotImplementedError(f"CP mode '{cp_mode}' not implemented.")
 
-    def forward(self, *args, **kwargs):
-        """
-        Calculate static electrostatic energy.
-
-        This method dispatches to the appropriate implementation based on cp_mode.
-        See _forward_emle, _forward_slater, and _forward_gaussian for specific signatures.
-        """
-        return self._forward_impl(*args, **kwargs)
-
     def _forward_emle(
         self, q_core, q_val, q_core_mm, q_val_mm, mesh_data, *args, **kwargs
     ):
@@ -299,13 +290,6 @@ class StaticElectrostatic(BaseInteraction):
             q_val_qm, q_val_mm, r, s_qm, s_mm
         )
         total = E_val_core + E_core_val + E_val_val + E_core_core
-
-        print("Slater CP components (kcal/mol):")
-        HARTREE_TO_KCALMOL = 627.5094740631
-        print(f"  Core-Core: {E_core_core.sum().item()*HARTREE_TO_KCALMOL:.6f}")
-        print(f"  Valence-Core: {E_val_core.sum().item()*HARTREE_TO_KCALMOL:.6f}")
-        print(f"  Core-Valence: {E_core_val.sum().item()*HARTREE_TO_KCALMOL:.6f}")
-        print(f"  Valence-Valence: {E_val_val.sum().item()*HARTREE_TO_KCALMOL:.6f}")
         return total
 
     @staticmethod
