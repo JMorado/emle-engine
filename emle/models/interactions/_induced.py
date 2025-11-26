@@ -75,7 +75,7 @@ class InducedElectrostatic(BaseInteraction):
 
         self._alpha_mode = alpha_mode
 
-    def forward(self, A_thole, charges_mm, s, mesh_data, mask):
+    def forward(self, A_thole, charges_mm, s, mesh_data, mask, gaussian_field=False):
         """
         Calculate induced electrostatic energy.
 
@@ -97,6 +97,10 @@ class InducedElectrostatic(BaseInteraction):
         mask: torch.Tensor (N_BATCH, N_QM_ATOMS, 1)
             Mask for padded coordinates.
 
+        gaussian_field: bool, optional
+            Whether to use Gaussian-smeared MM charges to compute the
+            electric field (True) or point charges (False).
+
         Returns
         -------
 
@@ -105,22 +109,74 @@ class InducedElectrostatic(BaseInteraction):
         """
         # Compute A_thole matrix
         mu_ind = InducedElectrostatic._get_mu_ind(
-            A_thole, mesh_data, charges_mm, s, mask
+            A_thole, mesh_data, charges_mm, s, mask, gaussian_field
         )
         vpot_ind = InducedElectrostatic._get_vpot_mu(mu_ind, mesh_data[2])
         return _torch.sum(vpot_ind * charges_mm, dim=1) * 0.5
 
     @staticmethod
-    def _get_mu_ind(A, mesh_data, q, s, mask):
-        """Calculate induced atomic dipoles."""
+    def _get_mu_ind(A, mesh_data, q, s, mask, gaussian_field):
+        """
+        Calculate induced atomic dipoles.
+
+        Parameters
+        ----------
+
+        A: torch.Tensor (N_BATCH, 3*N_QM_ATOMS, 3*N_QM_ATOMS)
+            Thole-damped polarizability interaction matrix.
+
+        mesh_data: tuple
+            Mesh data from EMLEBase._get_mesh_data.
+
+        q: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            MM point charges in atomic units.
+
+        s: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            MBIS valence shell widths.
+
+        mask: torch.Tensor (N_BATCH, N_QM_ATOMS, 1)
+            Mask for padded coordinates.
+
+        gaussian_field: bool
+            Whether to use Gaussian-smeared MM charges to compute the
+            electric field (True) or point charges (False).
+
+        Returns
+        -------
+
+        mu_ind: torch.Tensor (N_BATCH, N_QM_ATOMS, 3)
+            Induced atomic dipoles in atomic units.
+        """
         # r = 1.0 / mesh_data[0]
-        fields = _torch.sum(mesh_data[2] * q[:, None, :, None], dim=2).reshape(
-            len(s), -1
-        )
+        if gaussian_field:
+            fields = _torch.sum(mesh_data[3] * q[:, None, :, None], dim=2).reshape(
+                len(s), -1
+            )
+        else:
+            fields = _torch.sum(mesh_data[2] * q[:, None, :, None], dim=2).reshape(
+                len(s), -1
+            )
         mu_ind = _torch.linalg.solve(A, fields)
         return mu_ind.reshape((mu_ind.shape[0], -1, 3))
 
     @staticmethod
     def _get_vpot_mu(mu, T1):
-        """Calculate electrostatic potential from dipoles."""
+        """
+        Calculate electrostatic potential from dipoles.
+
+        Parameters
+        ----------
+
+        mu: torch.Tensor (N_BATCH, N_QM_ATOMS, 3)
+            Induced atomic dipoles in atomic units.
+
+        T1: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS, 3)
+            First-order interaction tensor.
+
+        Returns
+        -------
+
+        vpot: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Electrostatic potential at MM atom positions in atomic units.
+        """
         return -_torch.einsum("ijkl,ijl->ik", T1, mu)

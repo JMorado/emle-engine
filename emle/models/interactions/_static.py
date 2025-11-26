@@ -30,7 +30,6 @@ __all__ = ["StaticElectrostatic"]
 
 import torch as _torch
 from ._base import BaseInteraction
-from .._emle_base import EMLEBase
 
 
 class StaticElectrostatic(BaseInteraction):
@@ -111,6 +110,11 @@ class StaticElectrostatic(BaseInteraction):
         else:
             raise NotImplementedError(f"CP mode '{cp_mode}' not implemented.")
 
+    @property
+    def cp_mode(self):
+        """Charge penetration mode."""
+        return self._cp_mode
+
     def _forward_emle(
         self, q_core, q_val, q_core_mm, q_val_mm, mesh_data, *args, **kwargs
     ):
@@ -121,16 +125,22 @@ class StaticElectrostatic(BaseInteraction):
         ----------
 
         q_core: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            QM core charges.
+            QM core charges in atomic units.
 
         q_val: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            QM valence charges.
+            QM valence charges in atomic units.
 
-        charges_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            MM charges in atomic units.
+        q_core_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            MM core charges in atomic units (total charge for point charge model).
+
+        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            MM valence charges in atomic units (zero for point charge model).
 
         mesh_data: tuple
-            Mesh data from EMLEBase._get_mesh_data.
+            Mesh data from EMLEBase._get_mesh_data containing interaction tensors.
+
+        *args, **kwargs: Any
+            Additional arguments (ignored).
 
         Returns
         -------
@@ -163,26 +173,33 @@ class StaticElectrostatic(BaseInteraction):
         """
         Calculate static energy with Gaussian charge penetration correction.
 
+        Uses Gaussian-smeared charge distributions instead of point charges to
+        account for charge penetration effects at short range. The Gaussian widths
+        are derived from MBIS valence shell widths.
+
         Parameters
         ----------
 
-        q_core: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            QM core charges.
+        q_core_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            QM core charges in atomic units.
 
-        q_val: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            QM valence charges.
+        q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            QM valence charges in atomic units.
 
-        charges_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            MM charges in atomic units.
+        q_core_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            MM core charges in atomic units.
+
+        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            MM valence charges in atomic units.
 
         mesh_data: tuple
-            Mesh data from EMLEBase._get_mesh_data.
+            Mesh data from EMLEBase._get_mesh_data containing interaction tensors.
 
         s_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
-            MBIS valence shell widths for QM.
+            MBIS valence shell widths for QM atoms in Bohr.
 
-        idx_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
-            Indices for selecting MM parameters from NAGL model.
+        s_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            MBIS valence shell widths for MM atoms in Bohr.
 
         Returns
         -------
@@ -218,12 +235,11 @@ class StaticElectrostatic(BaseInteraction):
         vpot_static = StaticElectrostatic._get_vpot_q(q_qm, T0_cp)
         return _torch.sum(vpot_static * q_core_mm, dim=1)
 
-    @staticmethod
     def _forward_slater(
-        q_core_qm, q_val_qm, q_core_mm, q_val_mm, mesh_data, s_qm, s_mm
+        self, q_core_qm, q_val_qm, q_core_mm, q_val_mm, mesh_data, s_qm, s_mm
     ):
         """
-        Internal method to calculate the static electrostatic energy using a charge model
+        Calculate the static electrostatic energy using a charge model
         with point core charges and Slater valence charge distributions.
 
         This implements the charge penetration correction by using diffuse Slater-type
@@ -266,7 +282,9 @@ class StaticElectrostatic(BaseInteraction):
         """
         r_inv, T0_slater_qm_mm = mesh_data[0], mesh_data[1]
         r = _torch.where(r_inv > 0, 1.0 / (r_inv + 1e-16), 0.0)
-        T0_slater_mm_qm = EMLEBase._get_T0_slater(r.permute(0, 2, 1), s_mm[:, :, None])
+        T0_slater_mm_qm = self._emle_base._get_T0_slater(
+            r.permute(0, 2, 1), s_mm[:, :, None]
+        )
 
         # Mask out interactions involving padded atoms
         mask_s = (s_qm != 0)[:, :, None] & (s_mm != 0)[:, None, :]
@@ -370,21 +388,26 @@ class StaticElectrostatic(BaseInteraction):
     @staticmethod
     def _get_vpot_q(q, T0):
         """
-        Internal method to calculate the electrostatic potential.
+        Calculate the electrostatic potential at MM atom positions due to QM charges.
+
+        Computes the potential by contracting the charge distribution with the
+        interaction tensor T0, which represents 1/r or a modified interaction
+        depending on the charge penetration model used.
 
         Parameters
         ----------
 
-        q: torch.Tensor (N_BATCH, MAX_QM_ATOMS,)
-            QM charges (q_core or q_val).
+        q: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            QM charges in atomic units (either core or valence charges).
 
-        T0: torch.Tensor (N_BATCH, MAX_QM_ATOMS, MAX_MM_ATOMS)
-            T0 tensor for QM atoms over MM atom positions.
+        T0: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
+            Zeroth-order interaction tensor. Can be 1/r for point charges,
+            or modified tensor for charge penetration corrections.
 
         Returns
         -------
 
-        result: torch.Tensor (N_BATCH, MAX_MM_ATOMS)
-            Electrostatic potential over MM atoms.
+        vpot: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            Electrostatic potential at MM atom positions in atomic units.
         """
         return _torch.sum(T0 * q[:, :, None], dim=1)

@@ -56,6 +56,9 @@ class Dispersion(BaseInteraction):
                 "lj": Lennard-Jones 12-6 potential
                 "c6": C6/R^6 with Tang-Toennies damping
 
+        cp_mode: str, optional
+            Charge penetration mode (if any).
+
         device: torch.device
             The device on which to run the model.
 
