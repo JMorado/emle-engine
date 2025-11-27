@@ -208,18 +208,12 @@ class StaticElectrostatic(BaseInteraction):
             Static electrostatic energy with Gaussian CP correction in Hartree.
         """
         # Convert MBIS widths to Gaussian widths.
-        sigma_qm = s_qm * self._emle_base.a_Gauss
-        sigma_mm = s_mm * self._emle_base.a_Gauss
-        # s_mat = _torch.sqrt(sigma_qm[:, None, :] ** 2 + sigma_mm[:, :, None] ** 2)
-        # s_mat_mask = (sigma_qm[:, :, None] > 0) & (sigma_mm[:, None, :] > 0)
-        # s_mat = s_mat * s_mat_mask
-
+        sigma_qm = s_qm * self._emle_base.a_Gauss * 2
+        sigma_mm = s_mm * self._emle_base.a_Gauss * 2
         # Get gaussian T0 tensor.
         rinv = mesh_data[0]
         r = _torch.where(rinv > 0, 1.0 / rinv, _torch.zeros_like(rinv))
         q_qm = q_core_qm + q_val_qm
-
-        # T0_cp = EMLEBase._get_T0_gaussian(1.0, r, s_mat)
 
         sqrt2 = _torch.sqrt(_torch.tensor([2.0], dtype=r.dtype, device=r.device))
         sigma_sum = _torch.sqrt(
@@ -227,10 +221,9 @@ class StaticElectrostatic(BaseInteraction):
         )
         T0_cp = _torch.where(
             sigma_sum > 0,
-            _torch.erf(r / ((sigma_sum + 1e-16) * sqrt2)) / (r + 1e-16),
+            _torch.erf(r / ((sigma_sum * sqrt2) + 1e-16)) / (r + 1e-16),
             0.0,
         )
-
         # Calculate electrostatic potential due to QM charges with Gaussian CP.
         vpot_static = StaticElectrostatic._get_vpot_q(q_qm, T0_cp)
         return _torch.sum(vpot_static * q_core_mm, dim=1)

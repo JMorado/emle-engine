@@ -564,7 +564,7 @@ class EMLEBase(_torch.nn.Module):
 
         if calc_c6:
             c6_Z = self.c6_Z[species_id]
-            c6_scale = self._gpr(aev, self._ref_mean_c6, self._c_c6, species_id)
+            c6_scale = self._gpr(aev, self._ref_mean_c6, self._c_c6, species_id) ** 2
             c6 = c6_Z * c6_scale
         else:
             c6 = None
