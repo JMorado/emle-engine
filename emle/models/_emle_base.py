@@ -563,9 +563,9 @@ class EMLEBase(_torch.nn.Module):
             A_thole = None
 
         if calc_c6:
-            c6 = self.c6_Z[species_id]
-            c6_gpr = self._gpr(aev, self._ref_mean_c6, self._c_c6, species_id)
-            c6 = c6_gpr
+            c6_Z = self.c6_Z[species_id]
+            c6_scale = self._gpr(aev, self._ref_mean_c6, self._c_c6, species_id)
+            c6 = c6_Z * c6_scale
         else:
             c6 = None
 
@@ -982,14 +982,15 @@ class EMLEBase(_torch.nn.Module):
         T0_slater = _torch.where(mask, EMLEBase._get_T0_slater(r, s[:, :, None]), 0.0)
 
         if s_mm is not None:
-            u = r / s_mm[:, None, :]
+            sqrt2 = _torch.sqrt(_torch.tensor(2.0, dtype=r.dtype, device=r.device))
+            u = r / (s_mm[:, None, :] * sqrt2)
             erf_u = _torch.erf(u)
             exp_u2 = _torch.exp(-u * u)
-            factor = (
-                erf_u - (2.0 / _torch.sqrt(_torch.tensor(_torch.pi))) * u * exp_u2
-            ) * (r_inv**3)
+            sqrt2_pi = _torch.sqrt(
+                _torch.tensor(2.0 / _torch.pi, dtype=r.dtype, device=r.device)
+            )
+            factor = (erf_u - sqrt2_pi * u * exp_u2) * (r_inv**3)
             E_mm_gauss = rr * factor[..., None]
-
         return (
             r_inv,
             T0_slater,
