@@ -250,23 +250,8 @@ class Dispersion(BaseInteraction):
         E_disp: torch.Tensor (N_BATCH,)
             Lennard-Jones energy in Hartree.
         """
-        print(
-            "Shape c6_qm before:", c6_qm.shape, "Shape alpha_qm before:", alpha_qm.shape
-        )
         c6_qm = 0.5 * c6_qm * alpha_qm
         c6_mm = 4 * epsilon_mm * sigma_mm**6.0
-        print(
-            "Shape c6_mm:",
-            c6_mm.shape,
-            "Shape c6_qm:",
-            c6_qm.shape,
-            "Shape s_qm:",
-            s_qm.shape,
-            "Shape s_mm:",
-            s_mm.shape,
-            "Shape mesh_data[0]:",
-            mesh_data[0].shape,
-        )
         return self._get_dispersion_energy(c6_qm, c6_mm, s_qm, s_mm, mesh_data)
 
     @staticmethod

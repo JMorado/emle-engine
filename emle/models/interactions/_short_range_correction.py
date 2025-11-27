@@ -93,4 +93,4 @@ class ShortRangeCorrection(BaseInteraction):
         """
         A_sr_corr = A_sr_corr_qm[:, :, None] * A_sr_corr_mm[:, None, :]
         q_prod = 1  # q_val_qm[:, :, None] * q_val_mm[:, None, :]
-        return _torch.sum(q_prod * S * A_sr_corr, dim=(1, 2))
+        return -_torch.sum(q_prod * S * A_sr_corr, dim=(1, 2))

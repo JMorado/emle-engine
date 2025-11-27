@@ -157,15 +157,6 @@ class InducedElectrostatic(BaseInteraction):
                 len(s), -1
             )
 
-        fields1 = _torch.sum(mesh_data[3] * q[:, None, :, None], dim=2).reshape(
-            len(s), -1
-        )
-        fields2 = _torch.sum(mesh_data[2] * q[:, None, :, None], dim=2).reshape(
-            len(s), -1
-        )
-        fields_ratio = fields1 / (fields2 + 1e-16)
-        print("fields ratio (gaussian/point):", fields_ratio)
-
         mu_ind = _torch.linalg.solve(A, fields)
         return mu_ind.reshape((mu_ind.shape[0], -1, 3))
 
