@@ -745,9 +745,15 @@ class EMLETrainer:
             "aev_mask": emle_base._emle_aev_computer._mask,
             "zid_map": emle_base._emle_aev_computer._zid_map,
             "computer_n_species": len(emle_base._emle_aev_computer._zid_map) - 1,
-            "c6_Z": emle_base.c6_Z,
-            "c6_ref": emle_base.ref_values_c6,
         }
+
+        if train_c6:
+            emle_model.update(
+                {
+                    "c6_Z": emle_base.c6_Z,
+                    "ref_c6": emle_base.ref_values_c6,
+                }
+            )
 
         if model_filename is not None:
             self._write_model_to_file(emle_model, model_filename)
@@ -760,7 +766,7 @@ class EMLETrainer:
             z.to(device=device, dtype=_torch.int64),
             xyz.to(device=device, dtype=dtype),
             q_mol,
-            calc_c6=c6_train is not None,
+            calc_c6=c6 is not None,
         )
         z_mask = _torch.tensor(z > 0, device=device)
         plot_data = {
@@ -777,7 +783,9 @@ class EMLETrainer:
         if train_thole:
             plot_data.update(
                 {
-                    "alpha_species": self._thole_loss._get_alpha_mol(A_thole, z_mask),
+                    "alpha_species": self._thole_loss._get_alpha_mol(A_thole, z_mask)[
+                        0
+                    ],
                     "alpha_qm": alpha,
                 }
             )

@@ -128,13 +128,13 @@ class QEqLoss(_BaseLoss):
             Total molecular charges.
 
         q_target: torch.Tensor(N_BATCH, MAX_N_ATOMS)
-            Target atomic charges.
+            Target atomic charges.alpha_mol = alphas_ds.diagonal(dim1=1, dim2=2).sum(-1) / 3.0
         """
         # Recalculate reference values for chi.
         self._update_chi_gpr(self._emle_base)
 
         # Calculate q_core and q_val
-        _, q_core, q_val, _ = self._emle_base(atomic_numbers, xyz, q_mol)
+        _, q_core, q_val, *_ = self._emle_base(atomic_numbers, xyz, q_mol)
 
         mask = atomic_numbers > 0
         target = q_target[mask]
@@ -237,7 +237,7 @@ class TholeLoss(_BaseLoss):
         )
 
     @staticmethod
-    def _get_alpha_atomic(A_thole, mask, A_thole_inv=None):
+    def _get_alpha_atomic(A_thole, mask=None, A_thole_inv=None):
         """
         Compute isotropic polarizabilities.
 
@@ -264,7 +264,8 @@ class TholeLoss(_BaseLoss):
         block_traces = _torch.diagonal(Ainv_blocks, dim1=2, dim2=4)
         block_traces = block_traces.sum(dim=-1)
         alpha_atomic = block_traces.sum(dim=-1) / 3.0
-        alpha_atomic = alpha_atomic * mask
+        if mask is not None:
+            alpha_atomic = alpha_atomic * mask
         return alpha_atomic
 
     def _set_mode(self, mode):
@@ -331,7 +332,7 @@ class TholeLoss(_BaseLoss):
         mask = atomic_numbers > 0
 
         # Calculate A_thole and alpha_mol.
-        _, _, _, A_thole = self._emle_base(atomic_numbers, xyz, q_mol)
+        _, _, _, A_thole, _ = self._emle_base(atomic_numbers, xyz, q_mol)
         alpha_mol, A_thole_inv = self._get_alpha_mol(A_thole, mask)
 
         triu_row, triu_col = _torch.triu_indices(3, 3, offset=0)
@@ -342,7 +343,9 @@ class TholeLoss(_BaseLoss):
 
         # Calculate atomic polarizabilities loss.
         if alpha_atomic_target is not None:
-            alpha_atomic = self._get_alpha_atomic(A_thole, mask, A_thole_inv)
+            alpha_atomic = self._get_alpha_atomic(
+                A_thole, mask=mask, A_thole_inv=A_thole_inv
+            )
             alpha_atomic_target_vals = alpha_atomic_target[mask]
             alpha_atomic_vals = alpha_atomic[mask]
             loss_atomic = self._loss(alpha_atomic_vals, alpha_atomic_target_vals)
@@ -411,18 +414,19 @@ class DispersionCoefficientLoss(_BaseLoss):
         c6_target: torch.Tensor(N_BATCH, MAX_N_ATOMS)
             Target dispersion coefficients.
         """
-        calc_A_thole = self._pol is None
         # Update reference values for C6.
         self._update_c6_gpr(self._emle_base)
 
         # Calculate C6.
-        _, _, _, A_thole, c6 = self._emle_base(
-            atomic_numbers, xyz, q_mol, calc_A_thole, calc_c6=True
+        _, _, _, _, c6, *_ = self._emle_base(
+            atomic_numbers, xyz, q_mol, calc_A_thole=False, calc_c6=True
         )
 
         # Calculate isotropic polarizabilities if not already calculated.
         if self._pol is None:
-            self._pol = self._emle_base.get_isotropic_polarizabilities(A_thole).detach()
+            self._pol = TholeLoss._get_alpha_atomic(
+                self._emle_base._A_thole, mask=atomic_numbers > 0
+            )
 
         # Mask out dummy atoms.
         mask = atomic_numbers > 0

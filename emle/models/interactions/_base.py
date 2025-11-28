@@ -33,7 +33,7 @@ import torch as _torch
 
 class BaseInteraction(_torch.nn.Module):
     """
-    Abstract base class for all energy interaction modules.
+    Base class for all energy interaction modules.
 
     All interaction modules should inherit from this class and implement
     the forward method with their specific energy calculation.
