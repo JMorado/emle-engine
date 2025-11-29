@@ -163,7 +163,7 @@ class EMLEAnalyzer:
         qm_xyz_bohr = self.qm_xyz * _ANGSTROM_TO_BOHR
         pc_xyz_bohr = self.pc_xyz * _ANGSTROM_TO_BOHR
 
-        self.s, self.q_core, self.q_val, self.A_thole = emle_base(
+        self.s, self.q_core, self.q_val, self.A_thole, *_ = emle_base(
             self.atomic_numbers,
             self.qm_xyz,
             self.q_total,

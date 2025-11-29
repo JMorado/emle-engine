@@ -558,9 +558,13 @@ class EMLEBase(_torch.nn.Module):
                 )
                 k = k_scale * k
 
+            v = -60 * q_val * s**3
+            alpha = v * k
+
             A_thole = self._get_A_thole(r_data, s, q_val, k, self.a_Thole)
         else:
             A_thole = None
+            alpha = None
 
         if calc_c6:
             c6_Z = self.c6_Z[species_id]
@@ -569,7 +573,7 @@ class EMLEBase(_torch.nn.Module):
         else:
             c6 = None
 
-        return s, q_core, q_val, A_thole, c6
+        return s, q_core, q_val, A_thole, c6, alpha
 
     @classmethod
     def _get_Kinv(cls, ref_features, sigma):

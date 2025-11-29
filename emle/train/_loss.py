@@ -418,15 +418,13 @@ class DispersionCoefficientLoss(_BaseLoss):
         self._update_c6_gpr(self._emle_base)
 
         # Calculate C6.
-        _, _, _, _, c6, *_ = self._emle_base(
-            atomic_numbers, xyz, q_mol, calc_A_thole=False, calc_c6=True
+        _, _, _, A_thole, c6, *_ = self._emle_base(
+            atomic_numbers, xyz, q_mol, calc_A_thole=True, calc_c6=True
         )
 
         # Calculate isotropic polarizabilities if not already calculated.
         if self._pol is None:
-            self._pol = TholeLoss._get_alpha_atomic(
-                self._emle_base._A_thole, mask=atomic_numbers > 0
-            )
+            self._pol = TholeLoss._get_alpha_atomic(A_thole, mask=atomic_numbers > 0)
 
         # Mask out dummy atoms.
         mask = atomic_numbers > 0

@@ -85,8 +85,10 @@ class StaticElectrostatic(BaseInteraction):
             if not isinstance(cp_mode, str):
                 raise TypeError("'cp_mode' must be of type 'str'")
             cp_mode = cp_mode.lower().replace(" ", "")
-            if cp_mode not in ["gaussian", "slater"]:
-                raise ValueError("'cp_mode' must be 'gaussian' or 'slater'")
+            if cp_mode not in ["gaussian", "slater", "net-slater"]:
+                raise ValueError(
+                    "'cp_mode' must be 'gaussian', 'slater', or 'net-slater'"
+                )
 
         self._cp_mode = cp_mode
         self._method = method
@@ -94,6 +96,8 @@ class StaticElectrostatic(BaseInteraction):
 
         if cp_mode is None or self._method in ["mm", "mechanical"]:
             self._forward_impl = self._forward_emle
+        elif cp_mode == "net-slater":
+            self._forward_impl = self._forward_net_slater
         elif cp_mode == "slater":
             self._forward_impl = self._forward_slater
         elif cp_mode == "gaussian":
@@ -167,6 +171,46 @@ class StaticElectrostatic(BaseInteraction):
 
         return _torch.sum(vpot_static * q_core_mm, dim=1)
 
+    def _forward_net_slater(
+        self, q_core_qm, q_val_qm, q_core_mm, q_val_mm, mesh_data, *args, **kwargs
+    ):
+        """
+        Calculate static energy with Slater charge penetration correction
+        using net total charges (core + valence).
+
+        Uses Slater-type charge distributions instead of point charges to
+        account for charge penetration effects at short range. The Slater widths
+        are derived from MBIS valence shell widths.
+
+        Parameters
+        ----------
+
+        q_core_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            QM core charges in atomic units.
+
+        q_val_qm: torch.Tensor (N_BATCH, N_QM_ATOMS)
+            QM valence charges in atomic units.
+
+        q_core_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            MM core charges in atomic units.
+
+        q_val_mm: torch.Tensor (N_BATCH, N_MM_ATOMS)
+            MM valence charges in atomic units.
+
+        mesh_data: tuple
+            Mesh data from EMLEBase._get_mesh_data containing interaction tensors.
+
+        Returns
+        -------
+
+        E_static: torch.Tensor (N_BATCH,)
+            Static electrostatic energy.
+        """
+        q_qm = q_core_qm + q_val_qm
+        q_mm = q_core_mm
+        vpot_q_core = StaticElectrostatic._get_vpot_q(q_qm, mesh_data[0])
+        return _torch.sum(vpot_q_core * q_mm, dim=1)
+
     def _forward_gaussian(
         self, q_core_qm, q_val_qm, q_core_mm, q_val_mm, mesh_data, s_qm, s_mm
     ):
@@ -208,8 +252,8 @@ class StaticElectrostatic(BaseInteraction):
             Static electrostatic energy with Gaussian CP correction in Hartree.
         """
         # Convert MBIS widths to Gaussian widths.
-        sigma_qm = s_qm * self._emle_base.a_Gauss * 2
-        sigma_mm = s_mm * self._emle_base.a_Gauss * 2
+        sigma_qm = s_qm * self._emle_base.a_Gauss
+        sigma_mm = s_mm * self._emle_base.a_Gauss
         # Get gaussian T0 tensor.
         rinv = mesh_data[0]
         r = _torch.where(rinv > 0, 1.0 / rinv, _torch.zeros_like(rinv))
@@ -224,6 +268,17 @@ class StaticElectrostatic(BaseInteraction):
             _torch.erf(r / ((sigma_sum * sqrt2) + 1e-16)) / (r + 1e-16),
             0.0,
         )
+
+        damp = _torch.erf(r / ((sigma_sum * sqrt2) + 1e-16))
+        print(
+            "Damp.min:",
+            damp.min().item(),
+            "Damp.max:",
+            damp.max().item(),
+            "Damp.mean:",
+            damp.mean().item(),
+        )
+
         # Calculate electrostatic potential due to QM charges with Gaussian CP.
         vpot_static = StaticElectrostatic._get_vpot_q(q_qm, T0_cp)
         return _torch.sum(vpot_static * q_core_mm, dim=1)

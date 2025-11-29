@@ -751,7 +751,7 @@ class EMLETrainer:
             emle_model.update(
                 {
                     "c6_Z": emle_base.c6_Z,
-                    "ref_c6": emle_base.ref_values_c6,
+                    "c6_ref": emle_base.ref_values_c6,
                 }
             )
 
@@ -762,7 +762,7 @@ class EMLETrainer:
             return emle_base
 
         emle_base._alpha_mode = "species"
-        s_pred, q_core_pred, q_val_pred, A_thole, c6_pred = emle_base(
+        s_pred, q_core_pred, q_val_pred, A_thole, c6_pred, *_ = emle_base(
             z.to(device=device, dtype=_torch.int64),
             xyz.to(device=device, dtype=dtype),
             q_mol,
