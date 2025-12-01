@@ -661,7 +661,7 @@ class EMLE(_torch.nn.Module):
         xyz_qm_bohr = self._xyz_qm * ANGSTROM_TO_BOHR
         xyz_mm_bohr = self._xyz_mm * ANGSTROM_TO_BOHR
 
-        s, q_core, q_val, A_thole, c6 = self._emle_base.forward(
+        s, q_core, q_val, A_thole, c6, _ = self._emle_base.forward(
             self._atomic_numbers,
             self._xyz_qm,
             qm_charge,
