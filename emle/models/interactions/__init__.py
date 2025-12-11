@@ -32,6 +32,7 @@ from ._induced import InducedElectrostatic
 from ._exchange_repulsion import ExchangeRepulsion
 from ._short_range_correction import ShortRangeCorrection
 from ._dispersion import Dispersion
+from ._constants import ALPHA_FREE_TENSOR, RCUBED_FREE_TENSOR
 
 __all__ = [
     "BaseInteraction",
@@ -41,4 +42,6 @@ __all__ = [
     "ExchangeRepulsion",
     "ShortRangeCorrection",
     "Dispersion",
+    "ALPHA_FREE_TENSOR",
+    "RCUBED_FREE_TENSOR",
 ]

@@ -49,6 +49,9 @@ except:
     _has_nnpops = False
 
 
+from .interactions._constants import ALPHA_FREE_TENSOR, RCUBED_FREE_TENSOR
+
+
 class EMLEBase(_torch.nn.Module):
     """
     Base class for the EMLE model. This is used to compute valence shell
@@ -320,7 +323,8 @@ class EMLEBase(_torch.nn.Module):
         self.register_buffer("_A_exrep_qm", params.get("A_exrep_qm", None))
         self.register_buffer("_A_sr_corr_qm", params.get("A_sr_corr_qm", None))
         self.register_buffer("_lj_sigma_mm", params.get("lj_sigma_mm", None))
-        self.register_buffer("_lj_eps_mm", params.get("lj_eps_mm", None))
+        # self.register_buffer("_lj_eps_mm", params.get("lj_eps_mm", None))
+        self._lj_eps_mm = _torch.nn.Parameter(params.get("lj_eps_mm", None))
 
         # Register core charges for MM.
         if params.get("atomic_numbers_mm", None) is not None:
@@ -331,6 +335,17 @@ class EMLEBase(_torch.nn.Module):
             q_core_mm = None
 
         self.register_buffer("_q_core_mm", q_core_mm)
+
+        # Sigma scaling factors
+        params["ref_sigma_scale"] = _torch.ones_like(self.ref_values_s)
+        self.ref_values_sigma_scale = _torch.nn.Parameter(
+            params.get("ref_sigma_scale", _torch.ones_like(self.ref_values_s))
+        )
+        ref_mean_sigma_scale, c_sigma_scale = self._get_c(
+            n_ref, self.ref_values_sigma_scale, Kinv
+        )
+        self.register_buffer("_ref_mean_sigma_scale", ref_mean_sigma_scale)
+        self.register_buffer("_c_sigma_scale", c_sigma_scale)
 
     def to(self, *args, **kwargs):
         """
@@ -573,7 +588,11 @@ class EMLEBase(_torch.nn.Module):
         else:
             c6 = None
 
-        return s, q_core, q_val, A_thole, c6, alpha
+        sigma_scale = self._gpr(
+            aev, self._ref_mean_sigma_scale, self._c_sigma_scale, species_id
+        )
+
+        return s, q_core, q_val, A_thole, c6, alpha, sigma_scale
 
     @classmethod
     def _get_Kinv(cls, ref_features, sigma):
@@ -1123,7 +1142,7 @@ class EMLEBase(_torch.nn.Module):
 
         return S * mask_s
 
-    def get_isotropic_polarizabilities(
+    def get_isotropic_polarizabilities_thole(
         self, A_thole: _torch.Tensor, mask: Optional[_torch.Tensor] = None
     ) -> _torch.Tensor:
         """
@@ -1149,3 +1168,26 @@ class EMLEBase(_torch.nn.Module):
         if mask is not None:
             per_atom = per_atom * mask
         return per_atom
+
+    def get_isotropic_polarizabilities_xdm(
+        self, z: _torch.Tensor, volume: _torch.Tensor
+    ) -> _torch.Tensor:
+        """
+        Compute static dipole polarizabilities from the corresponding free atom polarizabilities.
+
+        Parameters
+        ----------
+        z : torch.Tensor
+            Scaling factors sigma_scale per atom. (N_BATCH, N_QM_ATOMS).
+
+        volume : torch.Tensor
+            Volume per atom. (N_BATCH, N_QM_ATOMS).
+
+        Returns
+        -------
+        torch.Tensor
+            Atomic static dipole polarizabilities.(N_BATCH, N_QM_ATOMS).
+        """
+        alpha = ALPHA_FREE_TENSOR.to(z.device)[z]
+        rcubed_ref = RCUBED_FREE_TENSOR.to(z.device)[z]
+        return alpha * (volume / (rcubed_ref + 1e-16))

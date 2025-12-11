@@ -343,6 +343,11 @@ class EMLE(_torch.nn.Module):
                 if "c6_ref" in params
                 else None
             ),
+            "ref_sigma_scale": (
+                _torch.tensor(params["sigma_scale_ref"], dtype=dtype, device=device)
+                if "sigma_scale_ref" in params
+                else None
+            ),
         }
 
         if method == "mm":
@@ -661,7 +666,7 @@ class EMLE(_torch.nn.Module):
         xyz_qm_bohr = self._xyz_qm * ANGSTROM_TO_BOHR
         xyz_mm_bohr = self._xyz_mm * ANGSTROM_TO_BOHR
 
-        s, q_core, q_val, A_thole, c6, _ = self._emle_base.forward(
+        s, q_core, q_val, A_thole, c6, _, sigma_scale = self._emle_base.forward(
             self._atomic_numbers,
             self._xyz_qm,
             qm_charge,
@@ -709,7 +714,10 @@ class EMLE(_torch.nn.Module):
         if self._method in ["electrostatic", "nonpol"] and self._dispersion_mode:
             sigma_mm = self._emle_base._lj_sigma_mm.gather(1, idx_mm)
             epsilon_mm = self._emle_base._lj_eps_mm.gather(1, idx_mm)
-            alpha_qm = self._emle_base.get_isotropic_polarizabilities(A_thole)
+            # alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
+            alpha_qm = self._emle_base.get_isotropic_polarizabilities_xdm(
+                self._atomic_numbers, -60 * q_val * s**3
+            )
         else:
             sigma_mm = None
             epsilon_mm = None
@@ -727,9 +735,11 @@ class EMLE(_torch.nn.Module):
         )
         E_exrep = self._exrep(A_exrep_qm, A_exrep_mm, q_val, q_val_mm, S)
         E_sr_corr = self._sr_corr(A_sr_corr_qm, A_sr_corr_mm, q_val, q_val_mm, S)
-        E_disp = self._disp(c6, alpha_qm, epsilon_mm, sigma_mm, mesh_data, s, s_mm)
+        E_disp = self._disp(
+            c6, alpha_qm, epsilon_mm, sigma_mm, mesh_data, s, s_mm, sigma_scale
+        )
 
-        if True:
+        if False:
             print(
                 f"EMLE static: {E_static.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
                 f"induced: {E_induced.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "

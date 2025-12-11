@@ -31,6 +31,7 @@ __all__ = ["Dispersion"]
 from ._base import BaseInteraction
 
 import torch as _torch
+import numpy as _np
 
 
 class Dispersion(BaseInteraction):
@@ -41,7 +42,15 @@ class Dispersion(BaseInteraction):
     potential or C6/R^6 with Tang-Toennies damping.
     """
 
-    def __init__(self, emle_base, mode=None, device=None, dtype=None):
+    def __init__(
+        self,
+        emle_base,
+        mode=None,
+        r_switch=None,
+        r_cutoff=None,
+        device=None,
+        dtype=None,
+    ):
         """
         Constructor.
 
@@ -56,8 +65,14 @@ class Dispersion(BaseInteraction):
                 "lj": Lennard-Jones 12-6 potential
                 "c6": C6/R^6 with Tang-Toennies damping
 
-        cp_mode: str, optional
-            Charge penetration mode (if any).
+        r_switch: float, optional
+            Switching distance in Angstrom. If provided with r_cutoff,
+            applies OpenMM-style switching function for r_switch < r < r_cutoff.
+            Only used for "lj" mode.
+
+        r_cutoff: float, optional
+            Cutoff distance in Angstrom. Required if r_switch is provided.
+            Only used for "lj" mode.
 
         device: torch.device
             The device on which to run the model.
@@ -77,8 +92,28 @@ class Dispersion(BaseInteraction):
         if mode not in ["lj", "c6"]:
             raise ValueError("'mode' must be 'lj' or 'c6'")
 
+        # Validate switching parameters
+        if r_switch is not None or r_cutoff is not None:
+            if r_switch is None or r_cutoff is None:
+                raise ValueError(
+                    "Both 'r_switch' and 'r_cutoff' must be provided together"
+                )
+            if r_switch >= r_cutoff:
+                raise ValueError("'r_switch' must be less than 'r_cutoff'")
+            if mode != "lj":
+                raise ValueError("Switching function is only supported for 'lj' mode")
+
+        self._r_switch = r_switch
+        self._r_cutoff = r_cutoff
+
         if mode == "lj":
             self._forward_impl = self._forward_lj
+            self._rvdw_prefactor = _torch.nn.Parameter(
+                _torch.tensor(2.54, device=self._device, dtype=self._dtype),
+            )
+            self._rvdw_exp = _torch.nn.Parameter(
+                _torch.tensor(1.0 / 7.0, device=self._device, dtype=self._dtype),
+            )
         elif mode == "c6":
             self._forward_impl = self._forward_c6
         else:
@@ -91,6 +126,9 @@ class Dispersion(BaseInteraction):
         epsilon_mm,
         sigma_mm,
         mesh_data,
+        s_qm,
+        s_mm,
+        sigma_scale,
         *args,
         **kwargs,
     ):
@@ -122,13 +160,18 @@ class Dispersion(BaseInteraction):
             Lennard-Jones energy in Hartree.
         """
         c6_qm = 0.5 * c6_qm * alpha_qm
-        sigma_qm, epsilon_qm = self._get_lj_parameters(c6_qm, alpha_qm)
+        sigma_qm, epsilon_qm = self._get_lj_parameters(c6_qm, alpha_qm, sigma_scale)
         return self._get_lj_energy(
-            sigma_qm, epsilon_qm, sigma_mm, epsilon_mm, mesh_data
+            sigma_qm,
+            epsilon_qm,
+            sigma_mm,
+            epsilon_mm,
+            mesh_data,
+            r_switch=self._r_switch,
+            r_cutoff=self._r_cutoff,
         )
 
-    @staticmethod
-    def _get_lj_parameters(c6, alpha):
+    def _get_lj_parameters(self, c6, alpha, sigma_scale):
         """
         Calculate Lennard-Jones sigma and epsilon parameters from C6 and polarizabilities.
 
@@ -153,14 +196,60 @@ class Dispersion(BaseInteraction):
         epsilon: torch.Tensor (N_BATCH, N_QM_ATOMS)
             Lennard-Jones epsilon parameter (depth of potential well).
         """
-        radius = 2.54 * alpha ** (1.0 / 7.0)
-        rmin = 2 * radius
+        # Get sigma scaling factors
+        radius = self._rvdw_prefactor * alpha**self._rvdw_exp
+        rmin = 2 * radius * sigma_scale
         sigma = rmin / (2 ** (1.0 / 6.0))
+        # with _torch.no_grad():
+        #    _np.savetxt("sigma_scale.txt", sigma_scale.cpu().numpy())
+
         epsilon = c6 / (2 * rmin**6.0)
         return sigma, epsilon
 
     @staticmethod
-    def _get_lj_energy(sigma_qm, epsilon_qm, sigma_mm, epsilon_mm, mesh_data):
+    def _apply_switching_function(r_inv, r_switch, r_cutoff):
+        """
+        Calculate OpenMM-style switching function.
+
+        Implements the switching function:
+        S = 1 - 6x^5 + 15x^4 - 10x^3
+        where x = (r - r_switch) / (r_cutoff - r_switch)
+
+        Parameters
+        ----------
+
+        r_inv: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
+            Inverse distances between QM and MM atoms.
+
+        r_switch: float
+            Switching distance in Angstrom.
+
+        r_cutoff: float
+            Cutoff distance in Angstrom.
+
+        Returns
+        -------
+
+        switch: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
+            Switching function values in range [0, 1].
+        """
+        r = 1.0 / r_inv
+        x = (r - r_switch) / (r_cutoff - r_switch)
+        # Clamp x to [0, 1] range to handle r < r_switch and r > r_cutoff
+        x = _torch.clamp(x, 0.0, 1.0)
+        switch = 1.0 - 6.0 * x**5 + 15.0 * x**4 - 10.0 * x**3
+        return switch
+
+    @staticmethod
+    def _get_lj_energy(
+        sigma_qm,
+        epsilon_qm,
+        sigma_mm,
+        epsilon_mm,
+        mesh_data,
+        r_switch=None,
+        r_cutoff=None,
+    ):
         """
         Calculate Lennard-Jones 12-6 energy between QM and MM atoms.
 
@@ -170,6 +259,9 @@ class Dispersion(BaseInteraction):
         Lorentz-Berthelot combining rules are applied to mix QM and MM parameters:
         - sigma_mix = (sigma_i + sigma_j) / 2
         - epsilon_mix = sqrt(epsilon_i * epsilon_j)
+
+        Optionally applies a switching function to smoothly reduce the energy to zero
+        at the cutoff distance (OpenMM-style switching).
 
         Parameters
         ----------
@@ -189,6 +281,12 @@ class Dispersion(BaseInteraction):
         mesh_data: tuple
             Mesh data tuple (r_inv, T0, T1) from EMLEBase._get_mesh_data.
 
+        r_switch: float, optional
+            Switching distance. If provided with r_cutoff, applies switching function.
+
+        r_cutoff: float, optional
+            Cutoff distance. Required if r_switch is provided.
+
         Returns
         -------
 
@@ -205,6 +303,12 @@ class Dispersion(BaseInteraction):
         sigma_r_inv_6 = (sigma * r_inv) ** 6
         sigma_r_inv_12 = sigma_r_inv_6 * sigma_r_inv_6
         lj_energy = 4 * epsilon * (sigma_r_inv_12 - sigma_r_inv_6)
+
+        # Apply switching function if r_switch and r_cutoff are provided
+        if r_switch is not None and r_cutoff is not None:
+            switch = Dispersion._apply_switching_function(r_inv, r_switch, r_cutoff)
+            lj_energy = lj_energy * switch
+
         return lj_energy.sum(dim=(1, 2))
 
     def _forward_c6(

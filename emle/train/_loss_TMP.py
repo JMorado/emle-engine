@@ -135,7 +135,7 @@ class QEqLoss(_BaseLoss):
         self._update_chi_gpr(self._emle_base)
 
         # Calculate q_core and q_val
-        _, q_core, q_val, _ = self._emle_base(atomic_numbers, xyz, q_mol)
+        _, q_core, q_val, *_ = self._emle_base(atomic_numbers, xyz, q_mol)
 
         mask = atomic_numbers > 0
         target = q_target[mask]
@@ -276,7 +276,7 @@ class TholeLoss(_BaseLoss):
             self._update_sqrtk_gpr(self._emle_base)
 
         # Calculate A_thole and alpha_mol.
-        _, _, _, A_thole = self._emle_base(atomic_numbers, xyz, q_mol)
+        _, _, _, A_thole, *_ = self._emle_base(atomic_numbers, xyz, q_mol)
         alpha_mol = self._get_alpha_mol(A_thole, atomic_numbers > 0)
 
         triu_row, triu_col = _torch.triu_indices(3, 3, offset=0)
@@ -719,7 +719,7 @@ class DispersionCoefficientLoss(_BaseLoss):
         self._update_c6_gpr(self._emle_base)
 
         # Calculate C6.
-        _, _, _, _, c6 = self._emle_base(atomic_numbers, xyz, q_mol, calc_c6=True)
+        _, _, _, _, c6, *_ = self._emle_base(atomic_numbers, xyz, q_mol, calc_c6=True)
 
         # Mask out dummy atoms.
         mask = atomic_numbers > 0
