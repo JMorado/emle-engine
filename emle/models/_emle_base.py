@@ -337,9 +337,11 @@ class EMLEBase(_torch.nn.Module):
         self.register_buffer("_q_core_mm", q_core_mm)
 
         # Sigma scaling factors
-        params["ref_sigma_scale"] = _torch.ones_like(self.ref_values_s)
+        if params.get("ref_sigma_scale", None) is None:
+            params["ref_sigma_scale"] = _torch.ones_like(self.ref_values_s)
+
         self.ref_values_sigma_scale = _torch.nn.Parameter(
-            params.get("ref_sigma_scale", _torch.ones_like(self.ref_values_s))
+            params.get("ref_sigma_scale", _torch.ones_like(self._ref_mean_c6))
         )
         ref_mean_sigma_scale, c_sigma_scale = self._get_c(
             n_ref, self.ref_values_sigma_scale, Kinv
@@ -1190,4 +1192,4 @@ class EMLEBase(_torch.nn.Module):
         """
         alpha = ALPHA_FREE_TENSOR.to(z.device)[z]
         rcubed_ref = RCUBED_FREE_TENSOR.to(z.device)[z]
-        return alpha * (volume / (rcubed_ref + 1e-16))
+        return alpha * (volume / (rcubed_ref + 1e-16)) ** (4 / 3.0)

@@ -923,6 +923,8 @@ class EMLECalculator:
                 atomic_numbers=atomic_numbers,
                 method="mm",
                 mm_charges=self._mm_charges,
+                nagl_params=nagl_params if nagl_model is not None else None,
+                dispersion_mode=dispersion_mode,
                 device=self._device,
             )
 
@@ -1427,7 +1429,9 @@ class EMLECalculator:
                 E_mm_qm_vac, grad_mm_qm_vac = 0.0, _np.zeros_like(xyz_qm_np)
 
             # Compute the embedding contributions.
-            E = self._emle_mm(atomic_numbers, charges_mm, xyz_qm, xyz_mm, charge)
+            E = self._emle_mm(
+                atomic_numbers, charges_mm, xyz_qm, xyz_mm, charge, idx_mm=idx_mm
+            )
             dE_dxyz_qm, dE_dxyz_mm = _torch.autograd.grad(
                 E.sum(), (xyz_qm, xyz_mm), allow_unused=allow_unused
             )

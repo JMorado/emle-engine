@@ -46,6 +46,9 @@ class Dispersion(BaseInteraction):
         self,
         emle_base,
         mode=None,
+        method="electrostatic",
+        epsilon_mm_qm=None,
+        sigma_mm_qm=None,
         r_switch=None,
         r_cutoff=None,
         device=None,
@@ -64,6 +67,16 @@ class Dispersion(BaseInteraction):
             Dispersion mode:
                 "lj": Lennard-Jones 12-6 potential
                 "c6": C6/R^6 with Tang-Toennies damping
+
+        method: str
+            The embedding method ("electrostatic", "mechanical", "nonpol", "mm").
+            Determines how LJ parameters are handled.
+
+        epsilon_mm_qm: torch.Tensor, optional
+            MM Lennard-Jones epsilon parameters for the QM region (required if method="mm").
+
+        sigma_mm_qm: torch.Tensor, optional
+            MM Lennard-Jones sigma parameters for the QM region (required if method="mm").
 
         r_switch: float, optional
             Switching distance in Angstrom. If provided with r_cutoff,
@@ -105,6 +118,9 @@ class Dispersion(BaseInteraction):
 
         self._r_switch = r_switch
         self._r_cutoff = r_cutoff
+        self._method = method
+        self._epsilon_mm_qm = epsilon_mm_qm
+        self._sigma_mm_qm = sigma_mm_qm
 
         if mode == "lj":
             self._forward_impl = self._forward_lj
@@ -159,8 +175,13 @@ class Dispersion(BaseInteraction):
         E_disp: torch.Tensor (N_BATCH,)
             Lennard-Jones energy in Hartree.
         """
-        c6_qm = 0.5 * c6_qm * alpha_qm
-        sigma_qm, epsilon_qm = self._get_lj_parameters(c6_qm, alpha_qm, sigma_scale)
+        if self._method == "mm":
+            batch_size = epsilon_mm.shape[0]
+            sigma_qm = self._sigma_mm_qm.expand(batch_size, -1)
+            epsilon_qm = self._epsilon_mm_qm.expand(batch_size, -1)
+        else:
+            c6_qm = 0.5 * c6_qm * alpha_qm
+            sigma_qm, epsilon_qm = self._get_lj_parameters(c6_qm, alpha_qm, sigma_scale)
         return self._get_lj_energy(
             sigma_qm,
             epsilon_qm,
@@ -200,9 +221,6 @@ class Dispersion(BaseInteraction):
         radius = self._rvdw_prefactor * alpha**self._rvdw_exp
         rmin = 2 * radius * sigma_scale
         sigma = rmin / (2 ** (1.0 / 6.0))
-        # with _torch.no_grad():
-        #    _np.savetxt("sigma_scale.txt", sigma_scale.cpu().numpy())
-
         epsilon = c6 / (2 * rmin**6.0)
         return sigma, epsilon
 
@@ -309,7 +327,52 @@ class Dispersion(BaseInteraction):
             switch = Dispersion._apply_switching_function(r_inv, r_switch, r_cutoff)
             lj_energy = lj_energy * switch
 
+        # print("LR_CORR:", Dispersion._lj_long_range_correction(
+        #    epsilon,
+        #    sigma,
+        #    12.0 * 1.889726124993589,  # Convert Angstrom to Bohr
+        # ) * 2625.5)  # Convert Hartree to kJ/mol
         return lj_energy.sum(dim=(1, 2))
+
+    @staticmethod
+    def _lj_long_range_correction(
+        epsilon,
+        sigma,
+        r_cutoff,
+    ):
+        """
+        Calculate long-range correction to Lennard-Jones energy.
+
+        Parameters
+        ----------
+        epsilon: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
+            Lennard-Jones epsilon parameters for QM-MM atom pairs.
+        sigma: torch.Tensor (N_BATCH, N_QM_ATOMS, N_MM_ATOMS)
+            Lennard-Jones sigma parameters for QM-MM atom pairs.
+        r_cutoff: float
+            Cutoff distance in Bohr.
+        volume: torch.Tensor (N_BATCH,)
+            Volume of the simulation box in Bohr^3.
+
+        Returns
+        -------
+        E_lj_lrc: torch.Tensor (N_BATCH,)
+            Long-range correction to Lennard-Jones energy in Hartree.
+        """
+        sigma6 = sigma**6
+        sigma12 = sigma6 * sigma6
+        N_QM = epsilon.shape[1]
+        N = 18000 + N_QM
+        volume = (
+            54 * 1.889726124993589
+        ) ** 3  # Example volume in Bohr^3 (34 Angstrom box)
+
+        prefactor = N_QM * 8 * 3.141592653589793 * (N / volume)
+        lj_lrc = prefactor * (
+            (_torch.mean(epsilon * sigma12, dim=(1, 2)) / (9 * r_cutoff**9))
+            - (_torch.mean(epsilon * sigma6, dim=(1, 2)) / (3 * r_cutoff**3))
+        )
+        return lj_lrc
 
     def _forward_c6(
         self,

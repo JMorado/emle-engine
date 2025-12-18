@@ -355,11 +355,25 @@ class EMLE(_torch.nn.Module):
         else:
             q_core_mm = _torch.empty(0, dtype=dtype, device=device)
 
+        # Extract MM LJ parameters for QM atoms if available
+        if nagl_params is not None and method == "mm":
+            epsilon_mm_qm = _torch.tensor(
+                nagl_params.get("lj_eps_qm"), dtype=dtype, device=device
+            )
+            sigma_mm_qm = _torch.tensor(
+                nagl_params.get("lj_sigma_qm"), dtype=dtype, device=device
+            )
+        else:
+            epsilon_mm_qm = _torch.empty(0, dtype=dtype, device=device)
+            sigma_mm_qm = _torch.empty(0, dtype=dtype, device=device)
+
         # Store the current device.
         self._device = device
 
         # Register constants as buffers.
         self.register_buffer("_q_core_mm", q_core_mm)
+        self.register_buffer("_epsilon_mm_qm", epsilon_mm_qm)
+        self.register_buffer("_sigma_mm_qm", sigma_mm_qm)
 
         if not isinstance(create_aev_calculator, bool):
             raise TypeError("'create_aev_calculator' must be of type 'bool'")
@@ -469,6 +483,9 @@ class EMLE(_torch.nn.Module):
                 Dispersion(
                     emle_base=self._emle_base,
                     mode=dispersion_mode,
+                    method=method,
+                    epsilon_mm_qm=self._epsilon_mm_qm if method == "mm" else None,
+                    sigma_mm_qm=self._sigma_mm_qm if method == "mm" else None,
                     device=device,
                     dtype=dtype,
                 )
@@ -497,6 +514,8 @@ class EMLE(_torch.nn.Module):
         Performs Tensor dtype and/or device conversion on the model.
         """
         self._q_core_mm = self._q_core_mm.to(*args, **kwargs)
+        self._epsilon_mm_qm = self._epsilon_mm_qm.to(*args, **kwargs)
+        self._sigma_mm_qm = self._sigma_mm_qm.to(*args, **kwargs)
         self._emle_base = self._emle_base.to(*args, **kwargs)
 
         self._static = self._static.to(*args, **kwargs)
@@ -518,6 +537,8 @@ class EMLE(_torch.nn.Module):
         Move all model parameters and buffers to CUDA memory.
         """
         self._q_core_mm = self._q_core_mm.cuda(**kwargs)
+        self._epsilon_mm_qm = self._epsilon_mm_qm.cuda(**kwargs)
+        self._sigma_mm_qm = self._sigma_mm_qm.cuda(**kwargs)
         self._emle_base = self._emle_base.cuda(**kwargs)
 
         self._static = self._static.cuda(**kwargs)
@@ -535,6 +556,8 @@ class EMLE(_torch.nn.Module):
         Move all model parameters and buffers to CPU memory.
         """
         self._q_core_mm = self._q_core_mm.cpu(**kwargs)
+        self._epsilon_mm_qm = self._epsilon_mm_qm.cpu(**kwargs)
+        self._sigma_mm_qm = self._sigma_mm_qm.cpu(**kwargs)
         self._emle_base = self._emle_base.cpu()
 
         self._static = self._static.cpu(**kwargs)
@@ -552,6 +575,8 @@ class EMLE(_torch.nn.Module):
         Casts all floating point model parameters and buffers to float64 precision.
         """
         self._q_core_mm = self._q_core_mm.double()
+        self._epsilon_mm_qm = self._epsilon_mm_qm.double()
+        self._sigma_mm_qm = self._sigma_mm_qm.double()
         self._emle_base = self._emle_base.double()
 
         self._static = self._static.double()
@@ -567,6 +592,8 @@ class EMLE(_torch.nn.Module):
         Casts all floating point model parameters and buffers to float32 precision.
         """
         self._q_core_mm = self._q_core_mm.float()
+        self._epsilon_mm_qm = self._epsilon_mm_qm.float()
+        self._sigma_mm_qm = self._sigma_mm_qm.float()
         self._emle_base = self._emle_base.float()
 
         self._static = self._static.float()
@@ -711,13 +738,17 @@ class EMLE(_torch.nn.Module):
             q_core_mm = self._charges_mm
 
         # Compute the dispersion or LJ energy.
-        if self._method in ["electrostatic", "nonpol"] and self._dispersion_mode:
+        if self._method in ["electrostatic", "nonpol", "mm"] and self._dispersion_mode:
             sigma_mm = self._emle_base._lj_sigma_mm.gather(1, idx_mm)
             epsilon_mm = self._emle_base._lj_eps_mm.gather(1, idx_mm)
-            # alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
-            alpha_qm = self._emle_base.get_isotropic_polarizabilities_xdm(
-                self._atomic_numbers, -60 * q_val * s**3
-            )
+            if self._method != "mm":
+                # alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
+                alpha_qm = self._emle_base.get_isotropic_polarizabilities_xdm(
+                    self._atomic_numbers, -60 * q_val * s**3
+                )
+            else:
+                alpha_qm = None
+
         else:
             sigma_mm = None
             epsilon_mm = None
@@ -741,10 +772,11 @@ class EMLE(_torch.nn.Module):
 
         if False:
             print(
-                f"EMLE static: {E_static.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                f"method: {self._method}, alpha_mode: {self._alpha_mode}, "
+                f"static: {E_static.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
                 f"induced: {E_induced.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
-                f"exrep: {E_exrep.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
-                f"short-range corr: {E_sr_corr.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                # f"exrep: {E_exrep.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
+                # f"short-range corr: {E_sr_corr.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol, "
                 f"dispersion: {E_disp.sum().item()*HARTREE_TO_KCALMOL:.6f} kcal/mol"
             )
 
