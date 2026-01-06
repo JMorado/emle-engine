@@ -634,9 +634,20 @@ class EMLE(_torch.nn.Module):
         qm_charge: int or torch.Tensor (BATCH,)
             The charge on the QM region.
 
-        idx_mm: torch.Tensor (N_MM_ATOMS,)
+        idx_mm: torch.Tensor (BATCH, N_MM_ATOMS, 2) or (BATCH, N_MM_ATOMS) or (N_MM_ATOMS,)
             Indices of MM atoms in the full system. This is required to
             select the correct NAGL parameters for the MM atoms.
+
+            If a 3D tensor is provided, it is assumed that the last dimension
+            contains the row and column indices for gathering from 2D NAGL
+            parameter tensors.
+
+            If a 2D tensor is provided, it is assumed that the last dimension
+            contains the indices for gathering from 1D NAGL parameter tensors.
+
+            If a 1D tensor is provided, it is assumed that it contains the indices
+            for gathering from 1D NAGL parameter tensors, and the same indices
+            are used for all batches.
 
         Returns
         -------
@@ -682,8 +693,24 @@ class EMLE(_torch.nn.Module):
                 idx_mm = _torch.as_tensor(
                     idx_mm, dtype=_torch.int64, device=self._device
                 )
-            if idx_mm.ndim == 1:
-                idx_mm = idx_mm.unsqueeze(0)
+
+            if idx_mm.ndim < 3:
+                idx_mm = idx_mm.unsqueeze(-1).unsqueeze(0 if idx_mm.ndim == 1 else ...)
+
+            if idx_mm.shape[-1] == 1:
+                nagl_cols = idx_mm[..., 0].expand(batch_size, -1)
+                n_rows = (
+                    batch_size
+                    if batch_size == self._emle_base._lj_sigma_mm.shape[0]
+                    else 1
+                )
+                nagl_rows = _torch.arange(n_rows, device=self._device).expand(
+                    batch_size, nagl_cols.shape[1]
+                )
+            else:
+                nagl_rows = idx_mm[..., 0]
+                nagl_cols = idx_mm[..., 1]
+
             max_n_mm_atoms = (idx_mm > 0).sum(dim=1).max()
             self._charges_mm = self._charges_mm[:, :max_n_mm_atoms]
             self._xyz_mm = self._xyz_mm[:, :max_n_mm_atoms, :]
@@ -724,9 +751,12 @@ class EMLE(_torch.nn.Module):
             A_sr_corr_qm = self._emle_base._A_sr_corr_qm.expand(batch_size, -1)
 
             # MM parameters.
-            A_sr_corr_mm = self._emle_base._A_sr_corr_mm.gather(1, idx_mm)
-            A_exrep_mm = self._emle_base._A_exrep_mm.gather(1, idx_mm)
-            q_core_mm = self._emle_base._q_core_mm.gather(1, idx_mm)
+            # A_sr_corr_mm = self._emle_base._A_sr_corr_mm.gather(1, idx_mm)
+            # A_exrep_mm = self._emle_base._A_exrep_mm.gather(1, idx_mm)
+            # q_core_mm = self._emle_base._q_core_mm.gather(1, idx_mm)
+            A_sr_corr_mm = self._emle_base._A_sr_corr_mm[nagl_rows, nagl_cols]
+            A_exrep_mm = self._emle_base._A_exrep_mm[nagl_rows, nagl_cols]
+            q_core_mm = self._emle_base._q_core_mm[nagl_rows, nagl_cols]
             q_val_mm = self._charges_mm - q_core_mm
         else:
             S = None
@@ -739,13 +769,15 @@ class EMLE(_torch.nn.Module):
 
         # Compute the dispersion or LJ energy.
         if self._method in ["electrostatic", "nonpol", "mm"] and self._dispersion_mode:
-            sigma_mm = self._emle_base._lj_sigma_mm.gather(1, idx_mm)
-            epsilon_mm = self._emle_base._lj_eps_mm.gather(1, idx_mm)
+            # sigma_mm = self._emle_base._lj_sigma_mm.gather(1, idx_mm)
+            # epsilon_mm = self._emle_base._lj_eps_mm.gather(1, idx_mm)
+            sigma_mm = self._emle_base._lj_sigma_mm[nagl_rows, nagl_cols]
+            epsilon_mm = self._emle_base._lj_eps_mm[nagl_rows, nagl_cols]
             if self._method != "mm":
-                # alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
-                alpha_qm = self._emle_base.get_isotropic_polarizabilities_xdm(
-                    self._atomic_numbers, -60 * q_val * s**3
-                )
+                alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
+                # alpha_qm = self._emle_base.get_isotropic_polarizabilities_xdm(
+                #    self._atomic_numbers, -60 * q_val * s**3
+                # )
             else:
                 alpha_qm = None
 
