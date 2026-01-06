@@ -1928,12 +1928,23 @@ class EMLECalculator:
         # Get QM and MM smarts
         smarts = system.smarts()
         qm_smarts = _sr.load(qm_parm7_file).smarts()
+
+        # Replace directional bond stereochemistry by a bond (causes problems in some molecules)
+        smarts = [s.replace("/", "-").replace("\\", "-") for s in smarts]
+        qm_smarts = [s.replace("/", "-").replace("\\", "-") for s in qm_smarts]
+
+        # Get QM indices by comparing SMARTS strings
         qm_indices = []
         for i, smt in enumerate(smarts):
             if smt in qm_smarts:
                 qm_indices.extend(
                     [atom.index().value() for atom in system.residues()[i].atoms()]
                 )
+
+        if not qm_indices:
+            raise RuntimeError(
+                f"Could not find EMLE's region SMARTS ({qm_smarts}) in system's SMARTS ({smarts})"
+            )
 
         # Create MM mask and separate QM and MM parameters.
         mm_mask = _torch.ones(s.shape[1], dtype=_torch.bool)
