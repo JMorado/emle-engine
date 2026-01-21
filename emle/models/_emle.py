@@ -680,6 +680,7 @@ class EMLE(_torch.nn.Module):
 
         # Ensure cell is a tensor and repeat for batch size if necessary.
         if cell is not None:
+            print(cell, type(cell))
             if isinstance(cell, _torch.Tensor):
                 if cell.ndim == 2:
                     cell = cell.repeat(batch_size, 1, 1).to(self._device)
