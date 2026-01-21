@@ -1357,7 +1357,7 @@ class EMLECalculator:
         if base_model is None:
             try:
                 if len(xyz_mm) > 0:
-                    E = self._emle(atomic_numbers, charges_mm, xyz_qm, xyz_mm, charge)
+                    E = self._emle(atomic_numbers, charges_mm, xyz_qm, xyz_mm, cell, charge)
                     dE_dxyz_qm, dE_dxyz_mm = _torch.autograd.grad(
                         E.sum(), (xyz_qm, xyz_mm), allow_unused=allow_unused
                     )
@@ -1430,7 +1430,7 @@ class EMLECalculator:
                 E_mm_qm_vac, grad_mm_qm_vac = 0.0, _np.zeros_like(xyz_qm_np)
 
             # Compute the embedding contributions.
-            E = self._emle_mm(atomic_numbers, charges_mm, xyz_qm, xyz_mm, charge)
+            E = self._emle_mm(atomic_numbers, charges_mm, xyz_qm, xyz_mm, cell, charge)
             dE_dxyz_qm, dE_dxyz_mm = _torch.autograd.grad(
                 E.sum(), (xyz_qm, xyz_mm), allow_unused=allow_unused
             )
@@ -1572,8 +1572,6 @@ class EMLECalculator:
         if cell is not None:
             cell = _np.array(cell)
 
-        print("CELL:", cell)
-
         # Make sure that the number of QM atoms matches the number of MM charges
         # when using mm embedding.
         if self._method == "mm":
@@ -1592,6 +1590,7 @@ class EMLECalculator:
             charges_mm,
             xyz_qm,
             xyz_mm,
+            cell=cell,
         )
 
         # Store the number of MM atoms.
