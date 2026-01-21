@@ -1572,6 +1572,8 @@ class EMLECalculator:
         if cell is not None:
             cell = _np.array(cell)
 
+        print("CELL:", cell)
+
         # Make sure that the number of QM atoms matches the number of MM charges
         # when using mm embedding.
         if self._method == "mm":
