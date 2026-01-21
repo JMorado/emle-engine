@@ -479,7 +479,6 @@ class EMLE(_torch.nn.Module):
                 if include_sr_corr
                 else NullInteraction(device=device, dtype=dtype)
             )
-            print("NUmber", nagl_params.get("lj_sigma_mm").shape)
 
             self._disp = (
                 Dispersion(
@@ -490,7 +489,7 @@ class EMLE(_torch.nn.Module):
                     sigma_mm_qm=self._sigma_mm_qm if method == "mm" else None,
                     r_switch=11,
                     r_cutoff=12,
-                    n_particles=None,
+                    n_particles=nagl_params.get("lj_sigma_mm").shape[1],
                     device=device,
                     dtype=dtype,
                 )
