@@ -395,8 +395,8 @@ class Dispersion(BaseInteraction):
         volume = _torch.det(cell).abs()
         _, n_qm, _ = epsilon.shape
         n_mm = n_particles - n_qm
-        rho_mm = n_particles / volume
-        pre_factor = 8 * _np.pi * n_qm * rho_mm
+        rho_mm = n_mm / volume
+        pre_factor = 8 * _np.pi * n_qm * rho_mm / 2.
 
         # LJ long-range correction
         lj_lrc = pre_factor * (
