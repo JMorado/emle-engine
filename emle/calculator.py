@@ -1926,12 +1926,12 @@ class EMLECalculator:
         lj_eps = _torch.cat(lj_eps_list, dim=0).unsqueeze(0)
 
         # Get QM and MM smarts
-        smarts = system.smarts()
-        qm_smarts = _sr.load(qm_parm7_file).smarts()
+        smarts = system.smarts(include_hydrogens=True)
+        qm_smarts = _sr.load(qm_parm7_file).smarts(include_hydrogens=True)
 
         # Replace directional bond stereochemistry by a bond (causes problems in some molecules)
-        smarts = [s.replace("/", "-").replace("\\", "-") for s in smarts]
-        qm_smarts = [s.replace("/", "-").replace("\\", "-") for s in qm_smarts]
+        smarts = [s.replace("/", "-").replace("\\", "-").replace("@", "") for s in smarts]
+        qm_smarts = [s.replace("/", "-").replace("\\", "-").replace("@", "") for s in qm_smarts]
 
         # Get QM indices by comparing SMARTS strings
         qm_indices = []
