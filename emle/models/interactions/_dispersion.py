@@ -356,9 +356,10 @@ class Dispersion(BaseInteraction):
                 cell,
                 n_particles=n_particles,
             ) 
+        else:
+            lr_corr = 0.0
 
-        print("LR_CORR:", lr_corr * 2625.5)
-        return lj_energy.sum(dim=(1, 2))
+        return lj_energy.sum(dim=(1, 2)) + lr_corr
 
     @staticmethod
     def _lj_long_range_correction(
