@@ -680,7 +680,6 @@ class EMLE(_torch.nn.Module):
 
         # Ensure cell is a tensor and repeat for batch size if necessary.
         if cell is not None:
-            print(cell, type(cell))
             if isinstance(cell, _torch.Tensor):
                 if cell.ndim == 2:
                     cell = cell.repeat(batch_size, 1, 1).to(self._device)
@@ -731,7 +730,10 @@ class EMLE(_torch.nn.Module):
             max_n_mm_atoms = (idx_mm > 0).sum(dim=1).max()
             self._charges_mm = self._charges_mm[:, :max_n_mm_atoms]
             self._xyz_mm = self._xyz_mm[:, :max_n_mm_atoms, :]
-
+       
+        print("idx_mm", idx_mm)
+        print("nagl_rows", nagl_rows)
+        print("nagl_cols", nagl_cols)
         # Convert coordinates to Bohr (needed for r_data computation)
         ANGSTROM_TO_BOHR = 1.8897261258369282
         xyz_qm_bohr = self._xyz_qm * ANGSTROM_TO_BOHR
