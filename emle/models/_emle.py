@@ -730,10 +730,8 @@ class EMLE(_torch.nn.Module):
             max_n_mm_atoms = (idx_mm > 0).sum(dim=1).max()
             self._charges_mm = self._charges_mm[:, :max_n_mm_atoms]
             self._xyz_mm = self._xyz_mm[:, :max_n_mm_atoms, :]
-       
-        print("idx_mm", idx_mm)
-        print("nagl_rows", nagl_rows)
-        print("nagl_cols", nagl_cols)
+    
+
         # Convert coordinates to Bohr (needed for r_data computation)
         ANGSTROM_TO_BOHR = 1.8897261258369282
         xyz_qm_bohr = self._xyz_qm * ANGSTROM_TO_BOHR
@@ -805,6 +803,7 @@ class EMLE(_torch.nn.Module):
             epsilon_mm = None
             alpha_qm = None
 
+        print("****METHOD:", self._method)
         # Calculate all energy components using interaction modules.
         E_static = self._static(q_core, q_val, q_core_mm, q_val_mm, mesh_data, s, s_mm)
         E_induced = self._induced(
@@ -817,7 +816,6 @@ class EMLE(_torch.nn.Module):
         )
         E_exrep = self._exrep(A_exrep_qm, A_exrep_mm, q_val, q_val_mm, S)
         E_sr_corr = self._sr_corr(A_sr_corr_qm, A_sr_corr_mm, q_val, q_val_mm, S)
-        print("CELL", cell)
         E_disp = self._disp(
             c6, alpha_qm, epsilon_mm, sigma_mm, mesh_data, s, s_mm, sigma_scale, cell
         )
