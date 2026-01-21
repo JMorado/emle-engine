@@ -1591,6 +1591,7 @@ class EMLECalculator:
             xyz_qm,
             xyz_mm,
             cell=cell,
+            idx_mm=idx_mm,
         )
 
         # Store the number of MM atoms.
