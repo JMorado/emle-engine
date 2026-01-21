@@ -803,7 +803,6 @@ class EMLE(_torch.nn.Module):
             epsilon_mm = None
             alpha_qm = None
 
-        print("****METHOD:", self._method)
         # Calculate all energy components using interaction modules.
         E_static = self._static(q_core, q_val, q_core_mm, q_val_mm, mesh_data, s, s_mm)
         E_induced = self._induced(
