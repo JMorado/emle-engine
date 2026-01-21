@@ -350,7 +350,7 @@ class Dispersion(BaseInteraction):
 
         if cell is not None and r_cutoff is not None and n_particles is not None:
             lr_corr = Dispersion._lj_long_range_correction(
-                epsilon_product,
+                epsilon,
                 sigma,
                 r_cutoff * 1.889726124993589, 
                 cell,
