@@ -51,6 +51,7 @@ class Dispersion(BaseInteraction):
         sigma_mm_qm=None,
         r_switch=None,
         r_cutoff=None,
+        n_particles=None,
         device=None,
         dtype=None,
     ):
@@ -87,6 +88,9 @@ class Dispersion(BaseInteraction):
             Cutoff distance in Angstrom. Required if r_switch is provided.
             Only used for "lj" mode.
 
+        n_particles: int, optional
+            Number of particles in the system (for long-range corrections).
+
         device: torch.device
             The device on which to run the model.
 
@@ -115,6 +119,13 @@ class Dispersion(BaseInteraction):
                 raise ValueError("'r_switch' must be less than 'r_cutoff'")
             if mode != "lj":
                 raise ValueError("Switching function is only supported for 'lj' mode")
+        
+        if n_particles is not None:
+            if not isinstance(n_particles, int) or n_particles <= 0:
+                raise ValueError("'n_particles' must be a positive integer")
+            self._n_particles = n_particles
+        else:
+            self._n_particles = None
 
         self._r_switch = r_switch
         self._r_cutoff = r_cutoff
@@ -145,6 +156,7 @@ class Dispersion(BaseInteraction):
         s_qm,
         s_mm,
         sigma_scale,
+        cell,
         *args,
         **kwargs,
     ):
@@ -190,6 +202,8 @@ class Dispersion(BaseInteraction):
             mesh_data,
             r_switch=self._r_switch,
             r_cutoff=self._r_cutoff,
+            cell=cell,
+            n_particles=self._n_particles,
         )
 
     def _get_lj_parameters(self, c6, alpha, sigma_scale):
@@ -267,6 +281,8 @@ class Dispersion(BaseInteraction):
         mesh_data,
         r_switch=None,
         r_cutoff=None,
+        cell=None,
+        n_particles=None,
     ):
         """
         Calculate Lennard-Jones 12-6 energy between QM and MM atoms.
@@ -305,6 +321,12 @@ class Dispersion(BaseInteraction):
         r_cutoff: float, optional
             Cutoff distance. Required if r_switch is provided.
 
+        cell: torch.Tensor, optional
+            Simulation cell tensor for LJ long-range correction.
+
+        n_particles: int, optional
+            Number of particles in the system (for long-range corrections).
+
         Returns
         -------
 
@@ -322,16 +344,20 @@ class Dispersion(BaseInteraction):
         sigma_r_inv_12 = sigma_r_inv_6 * sigma_r_inv_6
         lj_energy = 4 * epsilon * (sigma_r_inv_12 - sigma_r_inv_6)
 
-        # Apply switching function if r_switch and r_cutoff are provided
         if r_switch is not None and r_cutoff is not None:
             switch = Dispersion._apply_switching_function(r_inv, r_switch, r_cutoff)
             lj_energy = lj_energy * switch
 
-        # print("LR_CORR:", Dispersion._lj_long_range_correction(
-        #    epsilon,
-        #    sigma,
-        #    12.0 * 1.889726124993589,  # Convert Angstrom to Bohr
-        # ) * 2625.5)  # Convert Hartree to kJ/mol
+        if cell is not None and r_cutoff is not None and n_particles is not None:
+            lr_corr = Dispersion._lj_long_range_correction(
+                epsilon_product,
+                sigma,
+                r_cutoff * 1.889726124993589, 
+                cell,
+                n_particles=n_particles,
+            ) 
+
+        print("LR_CORR:", lr_corr * 2625.5)
         return lj_energy.sum(dim=(1, 2))
 
     @staticmethod
@@ -339,6 +365,8 @@ class Dispersion(BaseInteraction):
         epsilon,
         sigma,
         r_cutoff,
+        cell,
+        n_particles=None,
     ):
         """
         Calculate long-range correction to Lennard-Jones energy.
@@ -361,14 +389,14 @@ class Dispersion(BaseInteraction):
         """
         sigma6 = sigma**6
         sigma12 = sigma6 * sigma6
-        N_QM = epsilon.shape[1]
-        N = 18000 + N_QM
-        volume = (
-            54 * 1.889726124993589
-        ) ** 3  # Example volume in Bohr^3 (34 Angstrom box)
 
-        prefactor = N_QM * 8 * 3.141592653589793 * (N / volume)
-        lj_lrc = prefactor * (
+        # 8 * pi * (N_QM * N_MM) / V
+        volume = _torch.det(cell).abs()
+        _, n_qm, n_mm = epsilon.shape
+        pre_factor = 8 * _np.pi / (n_qm * n_mm / volume)
+
+        # LJ long-range correction
+        lj_lrc = pre_factor * (
             (_torch.mean(epsilon * sigma12, dim=(1, 2)) / (9 * r_cutoff**9))
             - (_torch.mean(epsilon * sigma6, dim=(1, 2)) / (3 * r_cutoff**3))
         )

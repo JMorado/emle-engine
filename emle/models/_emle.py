@@ -479,6 +479,8 @@ class EMLE(_torch.nn.Module):
                 if include_sr_corr
                 else NullInteraction(device=device, dtype=dtype)
             )
+            print("NUmber", nagl_params.get("lj_sigma_mm").shape)
+
             self._disp = (
                 Dispersion(
                     emle_base=self._emle_base,
@@ -486,6 +488,9 @@ class EMLE(_torch.nn.Module):
                     method=method,
                     epsilon_mm_qm=self._epsilon_mm_qm if method == "mm" else None,
                     sigma_mm_qm=self._sigma_mm_qm if method == "mm" else None,
+                    r_switch=11,
+                    r_cutoff=12,
+                    n_particles=None,
                     device=device,
                     dtype=dtype,
                 )
@@ -810,8 +815,9 @@ class EMLE(_torch.nn.Module):
         )
         E_exrep = self._exrep(A_exrep_qm, A_exrep_mm, q_val, q_val_mm, S)
         E_sr_corr = self._sr_corr(A_sr_corr_qm, A_sr_corr_mm, q_val, q_val_mm, S)
+        print("CELL", cell)
         E_disp = self._disp(
-            c6, alpha_qm, epsilon_mm, sigma_mm, mesh_data, s, s_mm, sigma_scale
+            c6, alpha_qm, epsilon_mm, sigma_mm, mesh_data, s, s_mm, sigma_scale, cell
         )
 
         if False:
