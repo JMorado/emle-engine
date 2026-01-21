@@ -344,9 +344,9 @@ class Dispersion(BaseInteraction):
         sigma_r_inv_12 = sigma_r_inv_6 * sigma_r_inv_6
         lj_energy = 4 * epsilon * (sigma_r_inv_12 - sigma_r_inv_6)
 
-        if r_switch is not None and r_cutoff is not None:
-            switch = Dispersion._apply_switching_function(r_inv, r_switch, r_cutoff)
-            lj_energy = lj_energy * switch
+        #if r_switch is not None and r_cutoff is not None:
+        #    switch = Dispersion._apply_switching_function(r_inv, r_switch, r_cutoff)
+        #    lj_energy = lj_energy * switch
 
         if cell is not None and r_cutoff is not None and n_particles is not None:
             lr_corr = Dispersion._lj_long_range_correction(
@@ -395,11 +395,9 @@ class Dispersion(BaseInteraction):
         volume = _torch.det(cell).abs()
         _, n_qm, _ = epsilon.shape
         n_mm = n_particles - n_qm
-        print("N_QM:", n_qm, "N_PART:", n_particles - n_qm, "V:", volume, "r_cutoff:", r_cutoff)
-        print("Cell:", cell)
         rho_mm = n_mm / volume
         pre_factor = 8 * _np.pi * n_qm * rho_mm
-        print("sigma", sigma, sigma.shape, "epsilon", epsilon, epsilon.shape)
+
         # LJ long-range correction
         lj_lrc = pre_factor * (
             (_torch.mean(epsilon * sigma12, dim=(1, 2)) / (9 * r_cutoff**9))
