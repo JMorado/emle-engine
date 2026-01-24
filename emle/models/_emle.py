@@ -788,6 +788,30 @@ class EMLE(_torch.nn.Module):
         if self._method in ["electrostatic", "nonpol", "mm"] and self._dispersion_mode:
             # sigma_mm = self._emle_base._lj_sigma_mm.gather(1, idx_mm)
             # epsilon_mm = self._emle_base._lj_eps_mm.gather(1, idx_mm)
+            z_mm = _torch.zeros_like(self._charges_mm, dtype=_torch.int64)
+            z_mm[self._charges_mm == -0.834] = 8  # O
+            z_mm[self._charges_mm == 0.417] = 1   # H
+            z_mm[self._charges_mm == -0.0764] = 6  # C
+            z_mm[self._charges_mm == 0.0382] = 1   # H
+            s_mm, q_core_mm, q_val_mm, A_thole_mm, c6_mm, _, sigma_scale_mm = self._emle_base.forward(
+                z_mm,
+                self._xyz_mm,
+                self._charges_mm.sum(dim=1).to(_torch.float32),
+                calc_A_thole=True,
+                calc_c6=True,
+            )
+            alpha_mm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole_mm)
+            c6_mm = 0.5 * c6_mm * alpha_mm
+            sigma_mm, epsilon_mm = self._disp._get_lj_parameters(c6_mm, alpha_mm, sigma_scale_mm)
+            self._charges_mm = q_core_mm + q_val_mm
+            if self._method != "mm":
+                alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
+                # alpha_qm = self._emle_base.get_isotropic_polarizabilities_xdm(
+                #    self._atomic_numbers, -60 * q_val * s**3
+                # )
+            else:
+                alpha_qm = None
+        elif self._method in ["nonpol", "mm"] and self._dispersion_mode:
             sigma_mm = self._emle_base._lj_sigma_mm[nagl_rows, nagl_cols]
             epsilon_mm = self._emle_base._lj_eps_mm[nagl_rows, nagl_cols]
             if self._method != "mm":
