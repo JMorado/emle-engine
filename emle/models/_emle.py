@@ -800,6 +800,13 @@ class EMLE(_torch.nn.Module):
                 calc_A_thole=True,
                 calc_c6=True,
             )
+            # Detatch tensors to avoid gradients flowing back through MM parameter calculations
+            s_mm = s_mm.detach()
+            q_core_mm = q_core_mm.detach()
+            q_val_mm = q_val_mm.detach()
+            A_thole_mm = A_thole_mm.detach()
+            c6_mm = c6_mm.detach()
+            sigma_scale_mm = sigma_scale_mm.detach()
             alpha_mm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole_mm)
             c6_mm = 0.5 * c6_mm * alpha_mm
             sigma_mm, epsilon_mm = self._disp._get_lj_parameters(c6_mm, alpha_mm, sigma_scale_mm)
