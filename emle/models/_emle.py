@@ -801,6 +801,11 @@ class EMLE(_torch.nn.Module):
             q_core_mm = self._q_core_emle[nagl_rows, nagl_cols] + self._q_val_emle[nagl_rows, nagl_cols]
             q_val_mm = None
             alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
+
+            print("Using EMLE NAGL parameters for dispersion calculation.")
+            print("sigma_mm:", sigma_mm)
+            print("epsilon_mm:", epsilon_mm * HARTREE_TO_KCALMOL * 4.184)
+            print("q_core_mm:", q_core_mm)
         elif self._method in ["nonpol", "mm"] and self._dispersion_mode:
             sigma_mm = self._emle_base._lj_sigma_mm[nagl_rows, nagl_cols]
             epsilon_mm = self._emle_base._lj_eps_mm[nagl_rows, nagl_cols]
