@@ -804,7 +804,9 @@ class EMLE(_torch.nn.Module):
             sigma_mm = self._emle_base._lj_sigma_mm[nagl_rows, nagl_cols]
             epsilon_mm = self._emle_base._lj_eps_mm[nagl_rows, nagl_cols]
             if self._method != "mm":
-                alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
+                vol = -60 * q_val * s**3
+                alpha_qm = self._emle_base.get_isotropic_polarizabilities_xdm(self._atomic_numbers, vol)
+                #alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
             else:
                 alpha_qm = None
         else:
