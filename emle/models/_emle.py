@@ -796,16 +796,11 @@ class EMLE(_torch.nn.Module):
 
         # Compute the dispersion or LJ energy.
         if self._method in ["electrostatic"] and self._dispersion_mode:
-            print("idx_mm", idx_mm)
             sigma_mm = self._lj_sigma_emle[nagl_rows, nagl_cols]
             epsilon_mm = self._lj_eps_emle[nagl_rows, nagl_cols]
             q_core_mm = self._q_core_emle[nagl_rows, nagl_cols]
             q_val_mm = self._q_val_emle[nagl_rows, nagl_cols]
             alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
-            print("Sigma_mm:", sigma_mm)
-            print("Epsilon_mm:", epsilon_mm)
-            print("Q_core_mm:", q_core_mm)
-            print("Q_val_mm:", q_val_mm)
         elif self._method in ["nonpol", "mm"] and self._dispersion_mode:
             sigma_mm = self._emle_base._lj_sigma_mm[nagl_rows, nagl_cols]
             epsilon_mm = self._emle_base._lj_eps_mm[nagl_rows, nagl_cols]
