@@ -798,8 +798,8 @@ class EMLE(_torch.nn.Module):
         if self._method in ["electrostatic"] and self._dispersion_mode:
             sigma_mm = self._lj_sigma_emle[nagl_rows, nagl_cols]
             epsilon_mm = self._lj_eps_emle[nagl_rows, nagl_cols]
-            q_core_mm = self._q_core_emle[nagl_rows, nagl_cols]
-            q_val_mm = self._q_val_emle[nagl_rows, nagl_cols]
+            q_core_mm = self._q_core_emle[nagl_rows, nagl_cols] + self._q_val_emle[nagl_rows, nagl_cols]
+            q_val_mm = None
             alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
         elif self._method in ["nonpol", "mm"] and self._dispersion_mode:
             sigma_mm = self._emle_base._lj_sigma_mm[nagl_rows, nagl_cols]
