@@ -506,8 +506,19 @@ class EMLECalculator:
             self._qm_charge = qm_charge
 
         if nagl_model is not None:
+            # Create the EMLE model instance.
+            emle_tmp = _EMLE(
+                model=model,
+                method=method,
+                alpha_mode=alpha_mode,
+                atomic_numbers=atomic_numbers,
+                mm_charges=self._mm_charges,
+                qm_charge=self._qm_charge,
+                device=self._device,
+            )
+
             nagl_params = self._get_nagl_parameters(
-                nagl_model, top_file, crd_file, parm7
+                nagl_model, top_file, crd_file, parm7, emle_tmp
             )
 
         # Create the EMLE model instance.
@@ -525,6 +536,8 @@ class EMLECalculator:
             include_sr_corr=include_sr_corr,
             dispersion_mode=dispersion_mode,
         )
+
+
 
         # Validate the backend(s).
         if backend is not None:
@@ -1385,7 +1398,7 @@ class EMLECalculator:
             try:
                 with _torch.jit.optimized_execution(False):
                     E = base_model(
-                        atomic_numbers, charges_mm, xyz_qm, xyz_mm, cell, charge
+                        atomic_numbers, charges_mm, xyz_qm, xyz_mm, cell, charge, idx_mm
                     )
                     dE_dxyz_qm, dE_dxyz_mm = _torch.autograd.grad(
                         E.sum(), (xyz_qm, xyz_mm), allow_unused=allow_unused
@@ -1571,6 +1584,8 @@ class EMLECalculator:
         xyz_mm = _np.array(xyz_mm)
         if cell is not None:
             cell = _np.array(cell)
+
+        print("idx_mm", idx_mm)
 
         # Make sure that the number of QM atoms matches the number of MM charges
         # when using mm embedding.
@@ -1811,7 +1826,7 @@ class EMLECalculator:
 
     @staticmethod
     def _get_nagl_parameters(
-        nagl_model_file, topology_file, coordinate_file, qm_parm7_file
+        nagl_model_file, topology_file, coordinate_file, qm_parm7_file, emle_model
     ):
         """
         Compute NAGL model parameters for a given system.
@@ -1826,6 +1841,8 @@ class EMLECalculator:
             Path to the coordinate file (e.g., DCD or PDB).
         qm_parm7_file : str
             Path to the AMBER parm7 file for the QM region.
+        emle_model : EMLE
+            An instance of the EMLE model.
 
         Returns
         -------
@@ -1868,6 +1885,8 @@ class EMLECalculator:
             model_filepath=nagl_model_file,
         )
 
+        emle_base = emle_model._emle_base
+
         system = _sr.load(topology_file, coordinate_file)
         (
             s_list,
@@ -1876,7 +1895,11 @@ class EMLECalculator:
             atomic_numbers_list,
             lj_sigma_list,
             lj_eps_list,
-        ) = ([], [], [], [], [], [])
+            lj_sigma_emle_list,
+            lj_eps_emle_list,
+            q_core_emle_list,
+            q_val_emle_list,
+        ) = ([], [], [], [], [], [], [], [], [], [])
         for residue in system.residues():
             # Get atomic numbers and coordinates for the residue.
             atomic_numbers = _torch.tensor(
@@ -1925,6 +1948,27 @@ class EMLECalculator:
                 A_exrep_list.append(props["A_exrep"])
                 A_sr_corr_list.append(props["A_sr_corr"])
 
+                # Compute EMLE properties.
+                s_emle, q_core_emle, q_val_emle, A_thole_emle, c6_emle, _, sigma_scale_emle = emle_base.forward(
+                    atomic_numbers.unsqueeze(0).to(emle_model._device),
+                    xyz.unsqueeze(0).to(emle_model._device),
+                    _torch.tensor([0.0], dtype=_torch.float32).to(emle_model._device),
+                    calc_A_thole=True,
+                    calc_c6=True,
+                )
+                alpha_emle = emle_base.get_isotropic_polarizabilities_thole(A_thole_emle)
+                c6_emle = 0.5 * c6_emle * alpha_emle
+                radius = 2.54 * alpha_emle**(1/7.)
+                rmin = 2 * radius * sigma_scale_emle
+                lj_sigma_emle = rmin / (2 ** (1.0 / 6.0))
+                epsilon_emle = c6_emle / (2 * rmin**6.0)
+
+                lj_sigma_emle_list.append(lj_sigma_emle[0])
+                lj_eps_emle_list.append(epsilon_emle[0])
+                q_core_emle_list.append(q_core_emle[0])
+                q_val_emle_list.append(q_val_emle[0])
+
+            # Append to lists.
             atomic_numbers_list.append(atomic_numbers)
             lj_sigma_list.append(lj_sigma)
             lj_eps_list.append(lj_eps)
@@ -1935,6 +1979,10 @@ class EMLECalculator:
         atomic_numbers = _torch.cat(atomic_numbers_list, dim=0).unsqueeze(0)
         lj_sigma = _torch.cat(lj_sigma_list, dim=0).unsqueeze(0)
         lj_eps = _torch.cat(lj_eps_list, dim=0).unsqueeze(0)
+        lj_sigma_emle = _torch.cat(lj_sigma_emle_list, dim=0).unsqueeze(0)
+        lj_eps_emle = _torch.cat(lj_eps_emle_list, dim=0).unsqueeze(0)
+        q_core_emle = _torch.cat(q_core_emle_list, dim=0).unsqueeze(0)
+        q_val_emle = _torch.cat(q_val_emle_list, dim=0).unsqueeze(0)
 
         # Get QM and MM smarts
         smarts = system.smarts(include_hydrogens=True)
@@ -1996,6 +2044,10 @@ class EMLECalculator:
             "lj_eps_qm": lj_eps_qm,
             "lj_sigma_mm": lj_sigma_mm,
             "lj_eps_mm": lj_eps_mm,
+            "lj_sigma_emle": lj_sigma_emle,
+            "lj_eps_emle": lj_eps_emle,
+            "q_core_emle": q_core_emle,
+            "q_val_emle": q_val_emle,
         }
 
         return nagl_params_dict

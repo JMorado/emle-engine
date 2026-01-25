@@ -355,6 +355,7 @@ class EMLE(_torch.nn.Module):
         else:
             q_core_mm = _torch.empty(0, dtype=dtype, device=device)
 
+        print("NAGL params:", nagl_params is not None)
         # Extract MM LJ parameters for QM atoms if available
         if nagl_params is not None and method == "mm":
             epsilon_mm_qm = _torch.tensor(
@@ -363,9 +364,18 @@ class EMLE(_torch.nn.Module):
             sigma_mm_qm = _torch.tensor(
                 nagl_params.get("lj_sigma_qm"), dtype=dtype, device=device
             )
+
+
         else:
             epsilon_mm_qm = _torch.empty(0, dtype=dtype, device=device)
             sigma_mm_qm = _torch.empty(0, dtype=dtype, device=device)
+
+        if nagl_params is not None and method == "electrostatic":
+            # TODO: Register NAGL EMLE parameters as buffers.
+            self._q_core_emle =  nagl_params.get("q_core_emle", None)
+            self._q_val_emle = nagl_params.get("q_val_emle", None)
+            self._lj_eps_emle = nagl_params.get("lj_eps_emle", None)
+            self._lj_sigma_emle = nagl_params.get("lj_sigma_emle", None)
 
         # Store the current device.
         self._device = device
@@ -465,7 +475,7 @@ class EMLE(_torch.nn.Module):
             )
         else:
             self._induced = NullInteraction(device=device, dtype=dtype)
-
+        
         if nagl_params:
             self._exrep = (
                 ExchangeRepulsion(emle_base=self._emle_base, device=device, dtype=dtype)
@@ -785,34 +795,17 @@ class EMLE(_torch.nn.Module):
             q_core_mm = self._charges_mm
 
         # Compute the dispersion or LJ energy.
-        if self._method in ["electrostatic", "nonpol", "mm"] and self._dispersion_mode:
-            # sigma_mm = self._emle_base._lj_sigma_mm.gather(1, idx_mm)
-            # epsilon_mm = self._emle_base._lj_eps_mm.gather(1, idx_mm)
-            z_mm = _torch.zeros_like(self._charges_mm, dtype=_torch.int64)
-            z_mm[self._charges_mm == -0.834] = 8  # O
-            z_mm[self._charges_mm == 0.417] = 1   # H
-            z_mm[self._charges_mm == -0.0764] = 6  # C
-            z_mm[self._charges_mm == 0.0382] = 1   # H
-            with _torch.no_grad():
-                s_mm, q_core_mm, q_val_mm, A_thole_mm, c6_mm, _, sigma_scale_mm = self._emle_base.forward(
-                    z_mm,
-                    self._xyz_mm,
-                    self._charges_mm.sum(dim=1).to(_torch.float32),
-                    calc_A_thole=True,
-                    calc_c6=True,
-                )
-            sigma_scale_mm = sigma_scale_mm.detach()
-            alpha_mm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole_mm)
-            c6_mm = 0.5 * c6_mm * alpha_mm
-            sigma_mm, epsilon_mm = self._disp._get_lj_parameters(c6_mm, alpha_mm, sigma_scale_mm)
-            self._charges_mm = q_core_mm + q_val_mm
-            if self._method != "mm":
-                alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
-                # alpha_qm = self._emle_base.get_isotropic_polarizabilities_xdm(
-                #    self._atomic_numbers, -60 * q_val * s**3
-                # )
-            else:
-                alpha_qm = None
+        if self._method in ["electrostatic"] and self._dispersion_mode:
+            print("idx_mm", idx_mm)
+            sigma_mm = self._lj_sigma_emle[nagl_rows, nagl_cols]
+            epsilon_mm = self._lj_eps_emle[nagl_rows, nagl_cols]
+            q_core_mm = self._q_core_emle[nagl_rows, nagl_cols]
+            q_val_mm = self._q_val_emle[nagl_rows, nagl_cols]
+            alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
+            print("Sigma_mm:", sigma_mm)
+            print("Epsilon_mm:", epsilon_mm)
+            print("Q_core_mm:", q_core_mm)
+            print("Q_val_mm:", q_val_mm)
         elif self._method in ["nonpol", "mm"] and self._dispersion_mode:
             sigma_mm = self._emle_base._lj_sigma_mm[nagl_rows, nagl_cols]
             epsilon_mm = self._emle_base._lj_eps_mm[nagl_rows, nagl_cols]
@@ -823,7 +816,6 @@ class EMLE(_torch.nn.Module):
                 # )
             else:
                 alpha_qm = None
-
         else:
             sigma_mm = None
             epsilon_mm = None
