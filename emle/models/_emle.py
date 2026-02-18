@@ -722,7 +722,7 @@ class EMLE(_torch.nn.Module):
             if idx_mm.ndim < 3:
                 idx_mm = idx_mm.unsqueeze(-1).unsqueeze(0 if idx_mm.ndim == 1 else ...)
 
-            if idx_mm.shape[-1] == 1:
+            if idx_mm.shape[-1] == 1 and self._emle_base._lj_sigma_mm is not None:
                 nagl_cols = idx_mm[..., 0].expand(batch_size, -1)
                 n_rows = (
                     batch_size
@@ -734,7 +734,7 @@ class EMLE(_torch.nn.Module):
                 )
             else:
                 nagl_rows = idx_mm[..., 0]
-                nagl_cols = idx_mm[..., 1]
+                nagl_cols = _torch.arange(idx_mm.shape[1], device=self._device).expand(batch_size, -1)
 
             max_n_mm_atoms = (idx_mm > 0).sum(dim=1).max()
             self._charges_mm = self._charges_mm[:, :max_n_mm_atoms]
@@ -804,9 +804,9 @@ class EMLE(_torch.nn.Module):
             sigma_mm = self._emle_base._lj_sigma_mm[nagl_rows, nagl_cols]
             epsilon_mm = self._emle_base._lj_eps_mm[nagl_rows, nagl_cols]
             if self._method != "mm":
-                vol = -60 * q_val * s**3
-                alpha_qm = self._emle_base.get_isotropic_polarizabilities_xdm(self._atomic_numbers, vol)
-                #alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
+                #vol = -60 * q_val * s**3
+                #alpha_qm = self._emle_base.get_isotropic_polarizabilities_xdm(self._atomic_numbers, vol)
+                alpha_qm = self._emle_base.get_isotropic_polarizabilities_thole(A_thole)
             else:
                 alpha_qm = None
         else:
