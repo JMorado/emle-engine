@@ -40,16 +40,8 @@ from . import EMLEBase as _EMLEBase
 from . import _patches
 from ._utils import _apply_switching_function, _preprocess_coordinates
 
-# Monkey-patch the TorchANI BuiltInModel and BuiltinEnsemble classes so that
-# they call self.aev_computer using args only to allow forward hooks to work
-# with TorchScript.
-_torchani.models.BuiltinModel = _patches.BuiltinModel
-_torchani.models.BuiltinEnsemble = _patches.BuiltinEnsemble
-
 try:
     import NNPOps as _NNPOps
-
-    _NNPOps.OptimizedTorchANI = _patches.OptimizedTorchANI
 
     _has_nnpops = True
 except:
