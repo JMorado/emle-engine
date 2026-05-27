@@ -28,6 +28,7 @@ __email__ = "lester.hedges@gmail.com"
 from typing import Optional, Tuple
 
 import torch as _torch
+from loguru import logger as _logger
 
 try:
     from NNPOps.neighbors import getNeighborPairs as _getNeighborPairs
@@ -35,6 +36,26 @@ try:
     _has_neighbor_pairs = True
 except:
     _has_neighbor_pairs = False
+
+
+_DEPRECATED_ALPHA_MODES = {"species": "fixed", "reference": "flexible"}
+
+
+def _sanitize_alpha_mode(alpha_mode, default="fixed"):
+    if alpha_mode is None:
+        return default
+    if not isinstance(alpha_mode, str):
+        raise TypeError("'alpha_mode' must be of type 'str'")
+    alpha_mode = alpha_mode.lower().replace(" ", "")
+    if alpha_mode in _DEPRECATED_ALPHA_MODES:
+        new_mode = _DEPRECATED_ALPHA_MODES[alpha_mode]
+        _logger.warning(
+            f"alpha_mode='{alpha_mode}' is deprecated; use '{new_mode}' instead."
+        )
+        alpha_mode = new_mode
+    if alpha_mode not in ("fixed", "flexible"):
+        raise ValueError("'alpha_mode' must be 'fixed' or 'flexible'")
+    return alpha_mode
 
 
 def _get_neighbor_pairs(
@@ -268,7 +289,7 @@ def _apply_switching_function(
     """
     Scale the MM charges using a smooth switching function based on the
     distance to the nearest QM atom.
-    
+
     Parameters
     ----------
 

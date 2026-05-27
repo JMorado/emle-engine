@@ -148,7 +148,7 @@ def deepmd_model_path_partial_typemap(tmp_path_factory):
 # Reference values computed with float64 to serve as a regression baseline
 # for the EMLE single-point energy and gradients.
 _EMLE_REFERENCE = {
-    "species": {
+    "fixed": {
         "energy": [-0.04694829706768215, -0.008400531962381722],
         "grad_qm_0": [0.003351301543246329, 0.0018965630117571137, -0.0041146694189497],
         "grad_mm_0": [
@@ -157,7 +157,7 @@ _EMLE_REFERENCE = {
             -0.0005122610976422208,
         ],
     },
-    "reference": {
+    "flexible": {
         "energy": [-0.04694829706768215, -0.008116915512224699],
         "grad_qm_0": [
             0.0028342878810772108,
@@ -173,7 +173,7 @@ _EMLE_REFERENCE = {
 }
 
 
-@pytest.mark.parametrize("alpha_mode", ["species", "reference"])
+@pytest.mark.parametrize("alpha_mode", ["fixed", "flexible"])
 def test_emle_single_point(alpha_mode):
     """
     Regression test: checks that the EMLE model produces the expected
@@ -230,7 +230,7 @@ def test_emle_single_point(alpha_mode):
         ), f"grad_mm[0,{j}] mismatch: got {grad_mm[0,j].item()}, expected {expected}"
 
 
-@pytest.mark.parametrize("alpha_mode", ["species", "reference"])
+@pytest.mark.parametrize("alpha_mode", ["fixed", "flexible"])
 def test_emle(alpha_mode, atomic_numbers, charges_mm, xyz_qm, xyz_mm):
     """
     Check that we can instantiate the default EMLE model, convert
@@ -255,7 +255,7 @@ def test_emle(alpha_mode, atomic_numbers, charges_mm, xyz_qm, xyz_mm):
     )
 
 
-@pytest.mark.parametrize("alpha_mode", ["species", "reference"])
+@pytest.mark.parametrize("alpha_mode", ["fixed", "flexible"])
 def test_ani2x(alpha_mode, atomic_numbers, charges_mm, xyz_qm, xyz_mm):
     """
     Check that we can instantiate the default ANI2xEMLE model,
@@ -292,7 +292,7 @@ def test_ani2x(alpha_mode, atomic_numbers, charges_mm, xyz_qm, xyz_mm):
 
 
 @pytest.mark.skipif(not has_nnpops, reason="NNPOps not installed")
-@pytest.mark.parametrize("alpha_mode", ["species", "reference"])
+@pytest.mark.parametrize("alpha_mode", ["fixed", "flexible"])
 def test_ani2x_nnpops(alpha_mode, atomic_numbers, charges_mm, xyz_qm, xyz_mm):
     """
     Check that we can instantiate the default ANI2xEMLE model with NNPOps,
@@ -321,7 +321,7 @@ def test_ani2x_nnpops(alpha_mode, atomic_numbers, charges_mm, xyz_qm, xyz_mm):
 @pytest.mark.skipif(not has_mace, reason="mace-torch not installed")
 @pytest.mark.skipif(not has_e3nn, reason="e3nn not installed")
 @pytest.mark.skipif(not has_nnpops, reason="NNPOps not installed")
-@pytest.mark.parametrize("alpha_mode", ["species", "reference"])
+@pytest.mark.parametrize("alpha_mode", ["fixed", "flexible"])
 @pytest.mark.parametrize(
     "mace_model", ["mace-off23-small", "mace-off23-medium", "mace-off23-large"]
 )
