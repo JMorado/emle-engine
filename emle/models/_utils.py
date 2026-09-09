@@ -287,37 +287,41 @@ def _apply_switching_function(
     switch_width: float,
 ) -> _torch.Tensor:
     """
-    Scale the MM charges using a smooth switching function based on the
-    distance to the nearest QM atom.
+        Scale the MM charges using a smooth switching function based on the
+        distance to the nearest QM atom.
+    <<<<<<< HEAD
 
-    Parameters
-    ----------
+    =======
 
-    atomic_numbers: torch.Tensor (BATCH, N_QM_ATOMS)
-        Atomic numbers of the QM atoms. Padding atoms are indicated using
-        a value of zero or less.
+    >>>>>>> 41e762c (Add switching function and preprocessing capabilities to EMLE model)
+        Parameters
+        ----------
 
-    charges_mm: torch.Tensor (BATCH, N_MM_ATOMS)
-        MM point charges in atomic units.
+        atomic_numbers: torch.Tensor (BATCH, N_QM_ATOMS)
+            Atomic numbers of the QM atoms. Padding atoms are indicated using
+            a value of zero or less.
 
-    xyz_qm: torch.Tensor (BATCH, N_QM_ATOMS, 3)
-        Positions of the QM atoms in Angstrom.
+        charges_mm: torch.Tensor (BATCH, N_MM_ATOMS)
+            MM point charges in atomic units.
 
-    xyz_mm: torch.Tensor (BATCH, N_MM_ATOMS, 3)
-        Positions of the MM atoms in Angstrom.
+        xyz_qm: torch.Tensor (BATCH, N_QM_ATOMS, 3)
+            Positions of the QM atoms in Angstrom.
 
-    cutoff: float
-        The QM/MM cutoff distance in Angstrom.
+        xyz_mm: torch.Tensor (BATCH, N_MM_ATOMS, 3)
+            Positions of the MM atoms in Angstrom.
 
-    switch_width: float
-        The fraction of the cutoff over which the switching function is
-        applied.
+        cutoff: float
+            The QM/MM cutoff distance in Angstrom.
 
-    Returns
-    -------
+        switch_width: float
+            The fraction of the cutoff over which the switching function is
+            applied.
 
-    charges_mm: torch.Tensor (BATCH, N_MM_ATOMS)
-        The MM charges, scaled by the switching function.
+        Returns
+        -------
+
+        charges_mm: torch.Tensor (BATCH, N_MM_ATOMS)
+            The MM charges, scaled by the switching function.
     """
     # Find the distance from each MM atom to the nearest QM atom.
     dist = _torch.cdist(xyz_mm, xyz_qm)
