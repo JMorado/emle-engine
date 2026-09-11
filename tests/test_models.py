@@ -352,6 +352,215 @@ def test_mace(alpha_mode, mace_model, atomic_numbers, charges_mm, xyz_qm, xyz_mm
     )
 
 
+# ---------------------------------------------------------------------------
+# DeePMDEMLE
+#
+# Run with float64 because DeePMD-kit's PyTorch backend is built around
+# `GLOBAL_PT_FLOAT_PRECISION = float64`; calling `.to(torch.float32)` on the
+# loaded model breaks DeePMD's internal type-cast contract (input is upcast
+# to float64 but parameters are float32). The DeePMDEMLE composite is
+# expected to be used at float64 in practice. The dtype-fix in forward
+# (cast E_vac to self._dtype, use self._dtype for empty-MM zeros) is locked
+# in by the output-dtype assertions below.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def deepmd_atomic_numbers():
+    return torch.tensor(
+        numpy.load("tests/input/atomic_numbers.npy"),
+        dtype=torch.int64,
+        device=torch.device("cpu"),
+    )
+
+
+@pytest.fixture(scope="module")
+def deepmd_xyz_qm():
+    return torch.tensor(
+        numpy.load("tests/input/xyz_qm.npy"),
+        dtype=torch.float64,
+        device=torch.device("cpu"),
+        requires_grad=True,
+    )
+
+
+@pytest.fixture(scope="module")
+def deepmd_xyz_mm():
+    return torch.tensor(
+        numpy.load("tests/input/xyz_mm.npy"),
+        dtype=torch.float64,
+        device=torch.device("cpu"),
+        requires_grad=True,
+    )
+
+
+@pytest.fixture(scope="module")
+def deepmd_charges_mm():
+    return torch.tensor(
+        numpy.load("tests/input/charges_mm.npy"),
+        dtype=torch.float64,
+        device=torch.device("cpu"),
+    )
+
+
+@pytest.mark.skipif(not has_deepmd, reason="deepmd-kit not installed")
+def test_deepmd_scripts_and_runs(
+    deepmd_model_path,
+    deepmd_atomic_numbers,
+    deepmd_charges_mm,
+    deepmd_xyz_qm,
+    deepmd_xyz_mm,
+):
+    """
+    Mirror of test_mace: the composite must instantiate, script under
+    TorchScript, run forward on unbatched and batched inputs, and produce
+    an autograd-traceable scalar.
+    """
+    model = DeePMDEMLE(deepmd_model=deepmd_model_path, dtype=torch.float64)
+    model = torch.jit.script(model)
+
+    # The composite always returns (3, num_batches); unbatched input is
+    # internally promoted to a batch of 1 (matches MACEEMLE).
+    energy = model(
+        deepmd_atomic_numbers,
+        deepmd_charges_mm,
+        deepmd_xyz_qm,
+        deepmd_xyz_mm,
+    )
+    assert energy.shape == (3, 1)
+    assert energy.dtype == torch.float64
+    grad_qm, grad_mm = torch.autograd.grad(energy.sum(), (deepmd_xyz_qm, deepmd_xyz_mm))
+    assert grad_qm.shape == deepmd_xyz_qm.shape
+    assert grad_mm.shape == deepmd_xyz_mm.shape
+
+    energy_b = model(
+        deepmd_atomic_numbers.unsqueeze(0).repeat(2, 1),
+        deepmd_charges_mm.unsqueeze(0).repeat(2, 1),
+        deepmd_xyz_qm.unsqueeze(0).repeat(2, 1, 1),
+        deepmd_xyz_mm.unsqueeze(0).repeat(2, 1, 1),
+    )
+    assert energy_b.shape == (3, 2)
+    assert energy_b.dtype == torch.float64
+
+
+@pytest.mark.skipif(not has_deepmd, reason="deepmd-kit not installed")
+def test_deepmd_empty_mm(
+    deepmd_model_path,
+    deepmd_atomic_numbers,
+    deepmd_xyz_qm,
+):
+    """
+    The empty-MM branch must return a tensor whose dtype matches the
+    composite's _dtype. Catches the original bug where the zeros row was
+    built from xyz_qm.dtype, leading to silent dtype promotion in
+    torch.stack when xyz_qm.dtype != self._dtype.
+    """
+    model = DeePMDEMLE(deepmd_model=deepmd_model_path, dtype=torch.float64)
+    xyz_mm_empty = torch.zeros(0, 3, dtype=torch.float64)
+    charges_mm_empty = torch.zeros(0, dtype=torch.float64)
+    energy = model(
+        deepmd_atomic_numbers,
+        charges_mm_empty,
+        deepmd_xyz_qm,
+        xyz_mm_empty,
+    )
+    assert energy.shape == (3, 1)
+    assert energy.dtype == model._dtype
+    # Static and induced rows must be exactly zero in the no-MM branch.
+    assert torch.all(energy[1] == 0)
+    assert torch.all(energy[2] == 0)
+
+
+@pytest.mark.skipif(not has_deepmd, reason="deepmd-kit not installed")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_deepmd_buffer_device(deepmd_model_path):
+    """
+    Calling .cuda()/.cpu() on the composite must move the registered
+    buffers (_atomic_numbers, _z_to_type) — not just the submodules. Before
+    the fix the overrides skipped super().to() and the buffers were
+    stranded, breaking forward at `self._z_to_type[atomic_numbers]`.
+    """
+    model = DeePMDEMLE(deepmd_model=deepmd_model_path, dtype=torch.float64)
+    assert model._z_to_type.device.type == "cpu"
+    assert model._atomic_numbers.device.type == "cpu"
+
+    model = model.cuda()
+    assert model._z_to_type.device.type == "cuda"
+    assert model._atomic_numbers.device.type == "cuda"
+
+    model = model.cpu()
+    assert model._z_to_type.device.type == "cpu"
+    assert model._atomic_numbers.device.type == "cpu"
+
+
+@pytest.mark.skipif(not has_deepmd, reason="deepmd-kit not installed")
+def test_deepmd_qbc(
+    deepmd_model_path,
+    deepmd_model_path_2,
+    deepmd_atomic_numbers,
+    deepmd_charges_mm,
+    deepmd_xyz_qm,
+    deepmd_xyz_mm,
+):
+    """
+    Two-model ensemble must populate _E_vac_qbc and _grads_qbc with the
+    shapes consumed by EMLECalculator (calculator.py:1351-1352). Different
+    seeds must produce non-zero per-model deviations.
+    """
+    model = DeePMDEMLE(
+        deepmd_model=[deepmd_model_path, deepmd_model_path_2],
+        dtype=torch.float64,
+    )
+    energy = model(
+        deepmd_atomic_numbers,
+        deepmd_charges_mm,
+        deepmd_xyz_qm,
+        deepmd_xyz_mm,
+    )
+    assert energy.shape == (3, 1)
+    n_qm = deepmd_atomic_numbers.shape[0]
+    assert model._E_vac_qbc.shape == (2, 1)
+    assert model._grads_qbc.shape == (2, 1, n_qm, 3)
+    # Different seeds -> the two members must disagree somewhere.
+    assert not torch.allclose(model._E_vac_qbc[0], model._E_vac_qbc[1])
+    assert not torch.allclose(model._grads_qbc[0], model._grads_qbc[1])
+
+    # Replicates the calculator's deviation computation
+    # (calculator.py:1351-1352) - must produce a finite scalar.
+    e_std = torch.std(model._E_vac_qbc).item()
+    max_f_std = torch.max(torch.std(model._grads_qbc, dim=0)).item()
+    assert numpy.isfinite(e_std)
+    assert numpy.isfinite(max_f_std)
+
+    energy_b = model(
+        deepmd_atomic_numbers.unsqueeze(0).repeat(2, 1),
+        deepmd_charges_mm.unsqueeze(0).repeat(2, 1),
+        deepmd_xyz_qm.unsqueeze(0).repeat(2, 1, 1),
+        deepmd_xyz_mm.unsqueeze(0).repeat(2, 1, 1),
+    )
+    assert energy_b.shape == (3, 2)
+    assert model._E_vac_qbc.shape == (2, 2)
+    assert model._grads_qbc.shape == (2, 2, n_qm, 3)
+
+    torch.jit.script(model)
+
+
+@pytest.mark.skipif(not has_deepmd, reason="deepmd-kit not installed")
+def test_deepmd_type_map_mismatch(deepmd_model_path, deepmd_model_path_partial_typemap):
+    """
+    Ensemble members must share a type map; otherwise the same atype
+    tensor would be silently misinterpreted by the secondaries.
+    """
+    with pytest.raises(ValueError, match="type_map"):
+        DeePMDEMLE(
+            deepmd_model=[
+                deepmd_model_path,
+                deepmd_model_path_partial_typemap,
+            ],
+            dtype=torch.float64,
+        )
+
+
 @pytest.mark.skipif(not has_mace, reason="mace-torch not installed")
 @pytest.mark.skipif(not has_e3nn, reason="e3nn not installed")
 @pytest.mark.skipif(not has_emle_mace_model, reason="Test emle-mace model not found")
