@@ -5,6 +5,7 @@ Changelog
 -----------------------------------------------------------------------------
 
 * Please add an item to this CHANGELOG for any new features or bug fixes when creating a PR.
+* Raise an error when pre-processing periodic coordinates if the box is too small for the QM/MM cutoff, which would otherwise cause energy discontinuities as MM atoms within the cutoff cross the box boundary [#117](https://github.com/chemle/emle-engine/issues/117).
 
 [2.0.3](https://github.com/chemle/emle-engine/compare/v2.0.2...v2.0.3) - Nov 2026
 -----------------------------------------------------------------------------

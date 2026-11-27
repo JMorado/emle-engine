@@ -170,6 +170,10 @@ def _preprocess_coordinates(
     applies a hard distance cutoff, zeroing the charges of MM atoms further
     than 'cutoff' from the nearest QM atom.
 
+    For periodic systems, half the box width must exceed 'cutoff' plus the
+    extent of the QM region from its centre, otherwise a ValueError is
+    raised.
+
     Parameters
     ----------
 
@@ -213,6 +217,26 @@ def _preprocess_coordinates(
     center = (xyz_qm * qm_mask).sum(dim=1, keepdim=True) / qm_mask.sum(
         dim=1, keepdim=True
     )
+
+    # The MM atoms are re-imaged into a box centred on the QM region, so the
+    # cutoff sphere around each QM atom must fit inside it. Otherwise, an MM
+    # atom within the cutoff can cross the box boundary and be wrapped to the
+    # other side, causing a discontinuity in the energy.
+    if cell is not None:
+        inv_cell = _torch.linalg.inv(cell)
+        frac = _torch.matmul((xyz_qm - center).detach(), inv_cell).abs()
+        frac = frac.masked_fill(~(atomic_numbers > 0).unsqueeze(-1), 0.0)
+        # The norms of the columns of the inverse cell are the inverse of
+        # the distances between opposite faces of the box.
+        reach = frac.amax(dim=1) + cutoff * _torch.linalg.vector_norm(
+            inv_cell, dim=1
+        )
+        if bool((reach >= 0.5).any()):
+            raise ValueError(
+                "The periodic box is too small for the QM/MM cutoff: half the "
+                "box width must exceed the cutoff plus the extent of the QM "
+                "region from its centre. Use a larger box or a smaller cutoff."
+            )
 
     # Re-image the MM atoms with respect to the QM region centre.
     xyz_mm = center + _minimum_image(xyz_mm - center, cell)

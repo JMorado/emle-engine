@@ -800,6 +800,47 @@ def test_deepmd_cutoff(
     )
 
 
+@pytest.mark.parametrize(
+    "cell, too_small",
+    [
+        ([[11.0, 0.0, 0.0], [0.0, 11.0, 0.0], [0.0, 0.0, 11.0]], False),
+        ([[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]], True),
+        # Triclinic: the a and c vectors are long enough, but the distance
+        # between the faces spanned by b and c is only 11 * sin(60) Angstrom.
+        ([[11.0, 0.0, 0.0], [5.5, 9.526, 0.0], [0.0, 0.0, 11.0]], True),
+    ],
+)
+@pytest.mark.parametrize("script", [False, True])
+def test_preprocess_box_too_small(cell, too_small, script):
+    """
+    Check that pre-processing rejects a periodic box whose half width is
+    smaller than the cutoff plus the extent of the QM region.
+    """
+    # A water molecule extending 0.72 Angstrom from its centre along x and a
+    # 4.5 Angstrom cutoff, so half the box width must exceed 5.22 Angstrom.
+    model = EMLE(cutoff=4.5, dtype=torch.float64, device=torch.device("cpu"))
+    if script:
+        model = torch.jit.script(model)
+    atomic_numbers = torch.tensor([8, 1, 1])
+    xyz_qm = torch.tensor(
+        [[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]], dtype=torch.float64
+    )
+    xyz_mm = torch.tensor([[3.0, 0.0, 0.0]], dtype=torch.float64)
+    charges_mm = torch.tensor([0.4], dtype=torch.float64)
+    cell = torch.tensor(cell, dtype=torch.float64)
+
+    def energy():
+        return model(
+            atomic_numbers, charges_mm, xyz_qm, xyz_mm, cell, 0, None, True, False
+        )
+
+    if too_small:
+        with pytest.raises(Exception, match="box is too small"):
+            energy()
+    else:
+        energy()
+
+
 @pytest.mark.skipif(not has_sire, reason="sire is not installed")
 @pytest.mark.parametrize("use_switching_function", [False, True])
 def test_preprocess_vs_sire(tmp_path, monkeypatch, use_switching_function):

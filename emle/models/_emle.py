@@ -446,7 +446,10 @@ class EMLE(_torch.nn.Module):
             the nearest QM atom. Requires 'cutoff' to have been set when the
             model was created. If 'cell' is None the system is treated as
             non-periodic: the QM region is assumed to already be whole, no
-            re-imaging is performed, and only the cutoff is applied.
+            re-imaging is performed, and only the cutoff is applied. For
+            periodic systems, half the box width must exceed 'cutoff' plus
+            the extent of the QM region from its centre, otherwise a
+            ValueError is raised.
 
         use_switching_function: bool
             Whether to scale the MM charges using a smooth switching
